@@ -110,6 +110,7 @@ def get_extensions():
 
 install_requires = [
     'scipy',
+    'triton==3.6.0',
 ]
 
 test_requires = [
