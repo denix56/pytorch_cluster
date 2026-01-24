@@ -181,7 +181,8 @@ def _triton_pairwise_distances(
         x = torch.nn.functional.normalize(x, dim=-1)
         y = torch.nn.functional.normalize(y, dim=-1)
         out = torch.empty((M, N), device=x.device, dtype=torch.float32)
-        grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
+        grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']),
+                             triton.cdiv(N, meta['BLOCK_N']))
         _pairwise_dot_kernel[grid](
             x,
             y,
@@ -201,7 +202,8 @@ def _triton_pairwise_distances(
     x_norm = (x * x).sum(dim=1).float()
     y_norm = (y * y).sum(dim=1).float()
     out = torch.empty((M, N), device=x.device, dtype=torch.float32)
-    grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
+    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']),
+                         triton.cdiv(N, meta['BLOCK_N']))
     _pairwise_distance_kernel[grid](
         x,
         y,
