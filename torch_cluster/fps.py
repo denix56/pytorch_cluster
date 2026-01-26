@@ -6,29 +6,6 @@ from torch import Tensor
 import torch_cluster.typing
 
 
-@torch.jit._overload  # noqa
-def fps(src, batch, ratio, random_start, batch_size, ptr):  # noqa
-    # type: (Tensor, Optional[Tensor], Optional[float], bool, Optional[int], Optional[Tensor]) -> Tensor  # noqa
-    pass  # pragma: no cover
-
-
-@torch.jit._overload  # noqa
-def fps(src, batch, ratio, random_start, batch_size, ptr):  # noqa
-    # type: (Tensor, Optional[Tensor], Optional[Tensor], bool, Optional[int], Optional[Tensor]) -> Tensor  # noqa
-    pass  # pragma: no cover
-
-
-@torch.jit._overload  # noqa
-def fps(src, batch, ratio, random_start, batch_size, ptr):  # noqa
-    # type: (Tensor, Optional[Tensor], Optional[float], bool, Optional[int], Optional[List[int]]) -> Tensor  # noqa
-    pass  # pragma: no cover
-
-
-@torch.jit._overload  # noqa
-def fps(src, batch, ratio, random_start, batch_size, ptr):  # noqa
-    # type: (Tensor, Optional[Tensor], Optional[Tensor], bool, Optional[int], Optional[List[int]]) -> Tensor  # noqa
-    pass  # pragma: no cover
-
 
 def fps(  # noqa
     src: torch.Tensor,

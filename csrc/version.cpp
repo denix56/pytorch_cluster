@@ -3,7 +3,8 @@
 #endif
 #include "cluster.h"
 #include "macros.h"
-#include <torch/script.h>
+#include <torch/torch.h>
+#include <torch/library.h>
 
 #ifdef WITH_CUDA
 #ifdef USE_ROCM
@@ -37,5 +38,7 @@ CLUSTER_API int64_t cuda_version() noexcept {
 }
 } // namespace cluster
 
-static auto registry = torch::RegisterOperators().op(
-    "torch_cluster::cuda_version", [] { return cluster::cuda_version(); });
+TORCH_LIBRARY(torch_cluster, m) {
+  m.def("cuda_version() -> int");
+  m.impl("cuda_version", [] { return cluster::cuda_version(); });
+}

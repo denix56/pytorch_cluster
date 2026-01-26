@@ -1,7 +1,8 @@
 #ifdef WITH_PYTHON
 #include <Python.h>
 #endif
-#include <torch/script.h>
+#include <torch/torch.h>
+#include <torch/library.h>
 
 #include "cpu/grid_cpu.h"
 
@@ -20,18 +21,21 @@ PyMODINIT_FUNC PyInit__grid_cpu(void) { return NULL; }
 #endif
 
 CLUSTER_API torch::Tensor grid(torch::Tensor pos, torch::Tensor size,
-                   std::optional<torch::Tensor> optional_start,
-                   std::optional<torch::Tensor> optional_end) {
-  if (pos.device().is_cuda()) {
-#ifdef WITH_CUDA
-    return grid_cuda(pos, size, optional_start, optional_end);
-#else
-    AT_ERROR("Not compiled with CUDA support");
-#endif
-  } else {
-    return grid_cpu(pos, size, optional_start, optional_end);
-  }
+                               std::optional<torch::Tensor> optional_start,
+                               std::optional<torch::Tensor> optional_end) {
+  return grid_cpu(pos, size, optional_start, optional_end);
 }
 
-static auto registry =
-    torch::RegisterOperators().op("torch_cluster::grid", &grid);
+TORCH_LIBRARY(torch_cluster, m) {
+  m.def("grid(Tensor pos, Tensor size, Tensor? start = None, Tensor? end = None) -> Tensor");
+}
+
+TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
+  m.impl("grid", &grid);
+}
+
+#ifdef WITH_CUDA
+TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
+  m.impl("grid", &grid_cuda);
+}
+#endif

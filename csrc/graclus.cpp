@@ -1,7 +1,8 @@
 #ifdef WITH_PYTHON
 #include <Python.h>
 #endif
-#include <torch/script.h>
+#include <torch/torch.h>
+#include <torch/library.h>
 
 #include "cpu/graclus_cpu.h"
 
@@ -20,17 +21,20 @@ PyMODINIT_FUNC PyInit__graclus_cpu(void) { return NULL; }
 #endif
 
 CLUSTER_API torch::Tensor graclus(torch::Tensor rowptr, torch::Tensor col,
-                      std::optional<torch::Tensor> optional_weight) {
-  if (rowptr.device().is_cuda()) {
-#ifdef WITH_CUDA
-    return graclus_cuda(rowptr, col, optional_weight);
-#else
-    AT_ERROR("Not compiled with CUDA support");
-#endif
-  } else {
-    return graclus_cpu(rowptr, col, optional_weight);
-  }
+                                  std::optional<torch::Tensor> optional_weight) {
+  return graclus_cpu(rowptr, col, optional_weight);
 }
 
-static auto registry =
-    torch::RegisterOperators().op("torch_cluster::graclus", &graclus);
+TORCH_LIBRARY(torch_cluster, m) {
+  m.def("graclus(Tensor rowptr, Tensor col, Tensor? weight = None) -> Tensor");
+}
+
+TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
+  m.impl("graclus", &graclus);
+}
+
+#ifdef WITH_CUDA
+TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
+  m.impl("graclus", &graclus_cuda);
+}
+#endif

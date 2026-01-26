@@ -1,7 +1,8 @@
 #ifdef WITH_PYTHON
 #include <Python.h>
 #endif
-#include <torch/script.h>
+#include <torch/torch.h>
+#include <torch/library.h>
 
 #include "extensions.h"
 
@@ -19,18 +20,12 @@ PyMODINIT_FUNC PyInit__nearest_cpu(void) { return NULL; }
 #endif
 #endif
 
-CLUSTER_API torch::Tensor nearest(torch::Tensor x, torch::Tensor y, torch::Tensor ptr_x,
-                      torch::Tensor ptr_y) {
-  if (x.device().is_cuda()) {
-#ifdef WITH_CUDA
-    return nearest_cuda(x, y, ptr_x, ptr_y);
-#else
-    AT_ERROR("Not compiled with CUDA support");
-#endif
-  } else {
-    AT_ERROR("No CPU version supported");
-  }
+TORCH_LIBRARY(torch_cluster, m) {
+  m.def("nearest(Tensor x, Tensor y, Tensor ptr_x, Tensor ptr_y) -> Tensor");
 }
 
-static auto registry =
-    torch::RegisterOperators().op("torch_cluster::nearest", &nearest);
+#ifdef WITH_CUDA
+TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
+  m.impl("nearest", &nearest_cuda);
+}
+#endif
