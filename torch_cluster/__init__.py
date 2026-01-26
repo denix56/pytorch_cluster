@@ -1,5 +1,4 @@
 import importlib
-import importlib.util
 import os.path as osp
 
 import torch
@@ -46,22 +45,6 @@ from .radius import radius, radius_graph  # noqa
 from .rw import random_walk  # noqa
 from .sampler import neighbor_sampler  # noqa
 
-_HAS_TRITON = importlib.util.find_spec('triton') is not None
-
-if _HAS_TRITON:
-    from .triton import (  # noqa
-        fps__triton,
-        graclus_cluster__triton,
-        grid_cluster__triton,
-        knn__triton,
-        knn_graph__triton,
-        nearest__triton,
-        neighbor_sampler__triton,
-        radius__triton,
-        radius_graph__triton,
-        random_walk__triton,
-    )
-
 __all__ = [
     'graclus_cluster',
     'grid_cluster',
@@ -75,17 +58,3 @@ __all__ = [
     'neighbor_sampler',
     '__version__',
 ]
-
-if _HAS_TRITON:
-    __all__ += [
-        'fps__triton',
-        'graclus_cluster__triton',
-        'grid_cluster__triton',
-        'knn__triton',
-        'knn_graph__triton',
-        'nearest__triton',
-        'neighbor_sampler__triton',
-        'radius__triton',
-        'radius_graph__triton',
-        'random_walk__triton',
-    ]

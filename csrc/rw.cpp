@@ -1,7 +1,8 @@
 #ifdef WITH_PYTHON
 #include <Python.h>
 #endif
-#include <torch/script.h>
+#include <torch/torch.h>
+#include <torch/library.h>
 
 #include "cpu/rw_cpu.h"
 
@@ -22,16 +23,19 @@ PyMODINIT_FUNC PyInit__rw_cpu(void) { return NULL; }
 CLUSTER_API std::tuple<torch::Tensor, torch::Tensor>
 random_walk(torch::Tensor rowptr, torch::Tensor col, torch::Tensor start,
             int64_t walk_length, double p, double q) {
-  if (rowptr.device().is_cuda()) {
-#ifdef WITH_CUDA
-    return random_walk_cuda(rowptr, col, start, walk_length, p, q);
-#else
-    AT_ERROR("Not compiled with CUDA support");
-#endif
-  } else {
-    return random_walk_cpu(rowptr, col, start, walk_length, p, q);
-  }
+  return random_walk_cpu(rowptr, col, start, walk_length, p, q);
 }
 
-static auto registry =
-    torch::RegisterOperators().op("torch_cluster::random_walk", &random_walk);
+TORCH_LIBRARY(torch_cluster, m) {
+  m.def("random_walk(Tensor rowptr, Tensor col, Tensor start, int walk_length, float p = 1, float q = 1) -> (Tensor, Tensor)");
+}
+
+TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
+  m.impl("random_walk", &random_walk);
+}
+
+#ifdef WITH_CUDA
+TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
+  m.impl("random_walk", &random_walk_cuda);
+}
+#endif
