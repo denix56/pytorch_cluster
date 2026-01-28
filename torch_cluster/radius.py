@@ -141,8 +141,5 @@ def radius_graph(
                         max_num_neighbors,
                         num_workers, batch_size, not loop)
     if flow == 'source_to_target':
-        row, col = edge_index[1], edge_index[0]
-    else:
-        row, col = edge_index[0], edge_index[1]
-
-    return torch.stack([row, col], dim=0)
+        return edge_index.flip(0).contiguous()
+    return edge_index

@@ -7,7 +7,7 @@ from torch_cluster import fps
 from torch_cluster.testing import devices, grad_dtypes, tensor
 
 
-@torch.jit.script
+@torch.compile
 def fps2(x: Tensor, ratio: Tensor) -> Tensor:
     return fps(x, None, ratio, False)
 

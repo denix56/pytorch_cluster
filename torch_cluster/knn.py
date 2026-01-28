@@ -12,6 +12,7 @@ def knn(
     cosine: bool = False,
     num_workers: int = 1,
     batch_size: Optional[int] = None,
+    use_triton: bool = False,
 ) -> torch.Tensor:
     r"""Finds for each element in :obj:`y` the :obj:`k` nearest points in
     :obj:`x`.
@@ -44,6 +45,7 @@ def knn(
     .. code-block:: python
 
         import torch
+
         from torch_cluster import knn
 
         x = torch.Tensor([[-1, -1], [-1, 1], [1, -1], [1, 1]])
@@ -69,6 +71,16 @@ def knn(
             batch_size = max(batch_size, int(batch_y.max()) + 1)
     assert batch_size > 0
 
+    if (use_triton and x.is_cuda and y.is_cuda
+            and x.dtype is not torch.float64 and y.dtype is not torch.float64):
+        try:
+            import triton
+        except ImportError:
+            print("Triton is not available. Falling back to general implementation.")
+        else:
+            from .triton.knn import knn as triton_knn
+            return triton_knn(x, y, k, batch_x, batch_y, cosine, batch_size)
+
     ptr_x: Optional[torch.Tensor] = None
     ptr_y: Optional[torch.Tensor] = None
     if batch_size > 1:
@@ -91,6 +103,7 @@ def knn_graph(
     cosine: bool = False,
     num_workers: int = 1,
     batch_size: Optional[int] = None,
+    use_triton: bool = False,
 ) -> torch.Tensor:
     r"""Computes graph edges to the nearest :obj:`k` points.
 
@@ -121,24 +134,22 @@ def knn_graph(
     .. code-block:: python
 
         import torch
+
         from torch_cluster import knn_graph
 
         x = torch.Tensor([[-1, -1], [-1, 1], [1, -1], [1, 1]])
         batch = torch.tensor([0, 0, 0, 0])
         edge_index = knn_graph(x, k=2, batch=batch, loop=False)
     """
-
     assert flow in ['source_to_target', 'target_to_source']
     edge_index = knn(x, x, k if loop else k + 1, batch, batch, cosine,
-                     num_workers, batch_size)
+                     num_workers, batch_size, use_triton=use_triton)
 
     if flow == 'source_to_target':
-        row, col = edge_index[1], edge_index[0]
-    else:
-        row, col = edge_index[0], edge_index[1]
+        edge_index = edge_index.flip(0)
 
     if not loop:
-        mask = row != col
-        row, col = row[mask], col[mask]
+        mask = edge_index[0] != edge_index[1]
+        edge_index = edge_index[:, mask]
 
-    return torch.stack([row, col], dim=0)
+    return edge_index.contiguous()

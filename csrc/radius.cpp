@@ -1,7 +1,8 @@
 #ifdef WITH_PYTHON
 #include <Python.h>
 #endif
-#include <torch/script.h>
+#include <torch/torch.h>
+#include <torch/library.h>
 
 #include "cpu/radius_cpu.h"
 
@@ -35,5 +36,12 @@ CLUSTER_API torch::Tensor radius(torch::Tensor x, torch::Tensor y,
   }
 }
 
-static auto registry =
-    torch::RegisterOperators().op("torch_cluster::radius", &radius);
+TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
+  m.impl("radius", &radius_cpu);
+}
+
+#ifdef WITH_CUDA
+TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
+  m.impl("radius", &radius_cuda);
+}
+#endif

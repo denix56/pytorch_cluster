@@ -1,7 +1,8 @@
 #ifdef WITH_PYTHON
 #include <Python.h>
 #endif
-#include <torch/script.h>
+#include <torch/torch.h>
+#include <torch/library.h>
 
 #include "cpu/knn_cpu.h"
 
@@ -36,5 +37,20 @@ CLUSTER_API torch::Tensor knn(torch::Tensor x, torch::Tensor y,
   }
 }
 
-static auto registry =
-    torch::RegisterOperators().op("torch_cluster::knn", &knn);
+torch::Tensor knn_cpu_wrap(torch::Tensor x, torch::Tensor y,
+                  std::optional<torch::Tensor> ptr_x,
+                  std::optional<torch::Tensor> ptr_y, int64_t k, bool cosine,
+                  int64_t num_workers) {
+    TORCH_CHECK(!cosine, "`cosine` argument not supported on CPU");
+    return knn_cpu(x, y, ptr_x, ptr_y, k, num_workers);
+}
+
+TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
+  m.impl("knn", &knn_cpu_wrap);
+}
+
+#ifdef WITH_CUDA
+    TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
+      m.impl("knn", &knn_cuda);
+    }
+#endif

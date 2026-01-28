@@ -39,5 +39,5 @@ def test_grid_cluster(test, dtype, device):
     cluster = grid_cluster(pos, size, start, end)
     assert cluster.tolist() == test['cluster']
 
-    jit = torch.jit.script(grid_cluster)
+    jit = torch.compile(grid_cluster)
     assert torch.equal(jit(pos, size, start, end), cluster)

@@ -31,7 +31,7 @@ def test_rw_small(device):
     out = random_walk(row, col, start, walk_length, num_nodes=3)
     assert out.tolist() == [[0, 1, 0, 1, 0], [1, 0, 1, 0, 1], [2, 2, 2, 2, 2]]
 
-    jit = torch.jit.script(random_walk)
+    jit = torch.compile(random_walk)
     assert torch.equal(jit(row, col, start, walk_length, num_nodes=3), out)
 
 
