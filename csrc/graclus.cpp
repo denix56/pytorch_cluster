@@ -21,16 +21,20 @@ PyMODINIT_FUNC PyInit__graclus_cpu(void) { return NULL; }
 #endif
 
 CLUSTER_API torch::Tensor graclus(torch::Tensor rowptr, torch::Tensor col,
-                                  std::optional<torch::Tensor> optional_weight) {
-  return graclus_cpu(rowptr, col, optional_weight);
-}
-
-TORCH_LIBRARY(torch_cluster, m) {
-  m.def("graclus(Tensor rowptr, Tensor col, Tensor? weight = None) -> Tensor");
+                      std::optional<torch::Tensor> optional_weight) {
+  if (rowptr.device().is_cuda()) {
+#ifdef WITH_CUDA
+    return graclus_cuda(rowptr, col, optional_weight);
+#else
+    AT_ERROR("Not compiled with CUDA support");
+#endif
+  } else {
+    return graclus_cpu(rowptr, col, optional_weight);
+  }
 }
 
 TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
-  m.impl("graclus", &graclus);
+  m.impl("graclus", &graclus_cpu);
 }
 
 #ifdef WITH_CUDA

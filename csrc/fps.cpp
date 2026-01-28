@@ -20,17 +20,21 @@ PyMODINIT_FUNC PyInit__fps_cpu(void) { return NULL; }
 #endif
 #endif
 
-CLUSTER_API torch::Tensor fps(torch::Tensor src, torch::Tensor ptr,
-                              torch::Tensor ratio, bool random_start) {
-  return fps_cpu(src, ptr, ratio, random_start);
-}
-
-TORCH_LIBRARY(torch_cluster, m) {
-  m.def("fps(Tensor src, Tensor ptr, Tensor ratio, bool random_start = False) -> Tensor");
+CLUSTER_API torch::Tensor fps(torch::Tensor src, torch::Tensor ptr, torch::Tensor ratio,
+                  bool random_start) {
+  if (src.device().is_cuda()) {
+#ifdef WITH_CUDA
+    return fps_cuda(src, ptr, ratio, random_start);
+#else
+    AT_ERROR("Not compiled with CUDA support");
+#endif
+  } else {
+    return fps_cpu(src, ptr, ratio, random_start);
+  }
 }
 
 TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
-  m.impl("fps", &fps);
+  m.impl("fps", &fps_cpu);
 }
 
 #ifdef WITH_CUDA

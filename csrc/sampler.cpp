@@ -16,16 +16,19 @@ PyMODINIT_FUNC PyInit__sampler_cpu(void) { return NULL; }
 #endif
 #endif
 
-CLUSTER_API torch::Tensor neighbor_sampler(torch::Tensor start,
-                                           torch::Tensor rowptr, int64_t count,
-                                           double factor) {
-  return neighbor_sampler_cpu(start, rowptr, count, factor);
-}
-
-TORCH_LIBRARY(torch_cluster, m) {
-  m.def("neighbor_sampler(Tensor start, Tensor rowptr, int count, float factor) -> Tensor");
+CLUSTER_API torch::Tensor neighbor_sampler(torch::Tensor start, torch::Tensor rowptr,
+                               int64_t count, double factor) {
+  if (rowptr.device().is_cuda()) {
+#ifdef WITH_CUDA
+    AT_ERROR("No CUDA version supported");
+#else
+    AT_ERROR("Not compiled with CUDA support");
+#endif
+  } else {
+    return neighbor_sampler_cpu(start, rowptr, count, factor);
+  }
 }
 
 TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
-  m.impl("neighbor_sampler", &neighbor_sampler);
+  m.impl("neighbor_sampler", &neighbor_sampler_cpu);
 }
