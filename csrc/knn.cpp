@@ -24,16 +24,29 @@ CLUSTER_API torch::Tensor knn(torch::Tensor x, torch::Tensor y,
                   std::optional<torch::Tensor> ptr_x,
                   std::optional<torch::Tensor> ptr_y, int64_t k, bool cosine,
                   int64_t num_workers) {
+  if (x.device().is_cuda()) {
+#ifdef WITH_CUDA
+    return knn_cuda(x, y, ptr_x, ptr_y, k, cosine);
+#else
+    AT_ERROR("Not compiled with CUDA support");
+#endif
+  } else {
+    if (cosine)
+      AT_ERROR("`cosine` argument not supported on CPU");
+    return knn_cpu(x, y, ptr_x, ptr_y, k, num_workers);
+  }
+}
+
+torch::Tensor knn_cpu_wrap(torch::Tensor x, torch::Tensor y,
+                  std::optional<torch::Tensor> ptr_x,
+                  std::optional<torch::Tensor> ptr_y, int64_t k, bool cosine,
+                  int64_t num_workers) {
     TORCH_CHECK(!cosine, "`cosine` argument not supported on CPU");
     return knn_cpu(x, y, ptr_x, ptr_y, k, num_workers);
 }
 
-TORCH_LIBRARY(torch_cluster, m) {
-  m.def("knn(Tensor a, Tensor b, Tensor? ptr_x, Tensor? ptr_y, int k, bool cosine = False, int num_workers = 1) -> Tensor");
-}
-
 TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
-  m.impl("knn", &knn);
+  m.impl("knn", &knn_cpu_wrap);
 }
 
 #ifdef WITH_CUDA

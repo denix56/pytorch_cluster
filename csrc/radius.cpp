@@ -21,21 +21,23 @@ PyMODINIT_FUNC PyInit__radius_cpu(void) { return NULL; }
 #endif
 
 CLUSTER_API torch::Tensor radius(torch::Tensor x, torch::Tensor y,
-                                 std::optional<torch::Tensor> ptr_x,
-                                 std::optional<torch::Tensor> ptr_y, double r,
-                                 int64_t max_num_neighbors,
-                                 int64_t num_workers,
-                                 bool ignore_same_index) {
-  return radius_cpu(x, y, ptr_x, ptr_y, r, max_num_neighbors, num_workers,
-                    ignore_same_index);
-}
-
-TORCH_LIBRARY(torch_cluster, m) {
-  m.def("radius(Tensor x, Tensor y, Tensor? ptr_x, Tensor? ptr_y, float r, int max_num_neighbors, int num_workers = 1, bool ignore_same_index = False) -> Tensor");
+                     std::optional<torch::Tensor> ptr_x,
+                     std::optional<torch::Tensor> ptr_y, double r,
+                     int64_t max_num_neighbors, int64_t num_workers,
+                     bool ignore_same_index) {
+  if (x.device().is_cuda()) {
+#ifdef WITH_CUDA
+    return radius_cuda(x, y, ptr_x, ptr_y, r, max_num_neighbors, ignore_same_index);
+#else
+    AT_ERROR("Not compiled with CUDA support");
+#endif
+  } else {
+    return radius_cpu(x, y, ptr_x, ptr_y, r, max_num_neighbors, num_workers, ignore_same_index);
+  }
 }
 
 TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
-  m.impl("radius", &radius);
+  m.impl("radius", &radius_cpu);
 }
 
 #ifdef WITH_CUDA

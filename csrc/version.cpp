@@ -38,7 +38,6 @@ CLUSTER_API int64_t cuda_version() noexcept {
 }
 } // namespace cluster
 
-TORCH_LIBRARY(torch_cluster, m) {
-  m.def("cuda_version() -> int");
+TORCH_LIBRARY_IMPL(torch_cluster, m) {
   m.impl("cuda_version", [] { return cluster::cuda_version(); });
 }
