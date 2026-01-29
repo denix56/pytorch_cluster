@@ -37,4 +37,7 @@ CLUSTER_API torch::Tensor nearest(torch::Tensor x, torch::Tensor y, torch::Tenso
 TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
     m.impl("nearest", &nearest_cuda);
 }
+TORCH_LIBRARY_IMPL(torch_cluster, HIP, m) {
+  m.impl("nearest", &nearest_cuda);
+}
 #endif

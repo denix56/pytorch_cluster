@@ -44,4 +44,7 @@ TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
 TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
   m.impl("radius", &radius_cuda);
 }
+TORCH_LIBRARY_IMPL(torch_cluster, HIP, m) {
+  m.impl("radius", &radius_cuda);
+}
 #endif

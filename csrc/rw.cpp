@@ -42,4 +42,8 @@ TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
 TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
   m.impl("random_walk", &random_walk_cuda);
 }
+
+TORCH_LIBRARY_IMPL(torch_cluster, HIP, m) {
+  m.impl("random_walk", &random_walk_cuda);
+}
 #endif
