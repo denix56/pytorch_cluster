@@ -41,4 +41,7 @@ TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
 TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
   m.impl("fps", &fps_cuda);
 }
+TORCH_LIBRARY_IMPL(torch_cluster, HIP, m) {
+  m.impl("fps", &fps_cuda);
+}
 #endif

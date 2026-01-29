@@ -50,5 +50,3 @@ TORCH_LIBRARY(torch_cluster, m) {
     m.def("neighbor_sampler(Tensor start, Tensor rowptr, int count, float factor) -> Tensor");
     m.def("cuda_version() -> int");
 }
-
-}
