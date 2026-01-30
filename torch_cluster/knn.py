@@ -95,7 +95,15 @@ def knn(
             )
         else:
             from .triton.knn import knn as triton_knn
-            return triton_knn(x, y, k, batch_x, batch_y, cosine, batch_size)
+            return triton_knn(
+                x,
+                y,
+                k,
+                batch_x,
+                batch_y,
+                cosine,
+                batch_size,
+            )
 
     ptr_x: Optional[torch.Tensor] = None
     ptr_y: Optional[torch.Tensor] = None
@@ -165,8 +173,17 @@ def knn_graph(
         edge_index = knn_graph(x, k=2, batch=batch, loop=False)
     """
     assert flow in ['source_to_target', 'target_to_source']
-    edge_index = knn(x, x, k if loop else k + 1, batch, batch, cosine,
-                     num_workers, batch_size, use_triton=use_triton)
+    edge_index = knn(
+        x,
+        x,
+        k if loop else k + 1,
+        batch,
+        batch,
+        cosine,
+        num_workers,
+        batch_size,
+        use_triton=use_triton,
+    )
 
     if flow == 'source_to_target':
         edge_index = edge_index.flip(0)

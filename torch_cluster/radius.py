@@ -1,6 +1,32 @@
+import importlib.util
 from typing import Optional
 
 import torch
+
+
+def _cap_neighbors_by_col(
+    edge_index: torch.Tensor,
+    max_num_neighbors: int,
+) -> torch.Tensor:
+    if max_num_neighbors <= 0 or edge_index.numel() == 0:
+        return edge_index
+    row, col = edge_index
+    max_row = int(row.max().item()) if row.numel() > 0 else -1
+    key = row * (max_row + 2) + col
+    order = torch.argsort(key)
+    row = row[order]
+    col = col[order]
+    idx = torch.arange(row.numel(), device=row.device)
+    row_diff = torch.ones_like(row, dtype=torch.bool)
+    if row.numel() > 1:
+        row_diff[1:] = row[1:] != row[:-1]
+    start_idx = torch.where(row_diff, idx, torch.zeros_like(idx))
+    start_idx = torch.cummax(start_idx, 0).values
+    pos = idx - start_idx
+    mask = pos < max_num_neighbors
+    row = row[mask]
+    col = col[mask]
+    return torch.stack([row, col], dim=0)
 
 
 @torch.library.register_fake("torch_cluster::radius")
@@ -36,6 +62,7 @@ def radius(
     num_workers: int = 1,
     batch_size: Optional[int] = None,
     ignore_same_index: bool = False,
+    use_triton: bool = False,
 ) -> torch.Tensor:
     r"""Finds for each element in :obj:`y` all points in :obj:`x` within
     distance :obj:`r`.
@@ -67,6 +94,8 @@ def radius(
         ignore_same_index (bool, optional): If :obj:`True`, each element in
             :obj:`y` ignores the point in :obj:`x` with the same index.
             (default: :obj:`False`)
+        use_triton (bool, optional): If :obj:`True`, use Triton kernels when
+            available. (default: :obj:`False`)
 
     .. code-block:: python
 
@@ -96,6 +125,26 @@ def radius(
             batch_size = max(batch_size, int(batch_y.max()) + 1)
     assert batch_size > 0
 
+    if (use_triton and x.is_cuda and y.is_cuda
+            and x.dtype is not torch.float64 and y.dtype is not torch.float64):
+        if importlib.util.find_spec("triton") is None:
+            print(
+                "Triton is not available. Falling back to general "
+                "implementation."
+            )
+        else:
+            from .triton.radius import radius as triton_radius
+            return triton_radius(
+                x,
+                y,
+                r,
+                batch_x,
+                batch_y,
+                max_num_neighbors,
+                batch_size,
+                ignore_same_index,
+            )
+
     ptr_x: Optional[torch.Tensor] = None
     ptr_y: Optional[torch.Tensor] = None
 
@@ -120,6 +169,7 @@ def radius_graph(
     flow: str = 'source_to_target',
     num_workers: int = 1,
     batch_size: Optional[int] = None,
+    use_triton: bool = False,
 ) -> torch.Tensor:
     r"""Computes graph edges to all points within a given distance.
 
@@ -146,6 +196,8 @@ def radius_graph(
             on the GPU. (default: :obj:`1`)
         batch_size (int, optional): The number of examples :math:`B`.
             Automatically calculated if not given. (default: :obj:`None`)
+        use_triton (bool, optional): If :obj:`True`, use Triton kernels when
+            available. (default: :obj:`False`)
 
     :rtype: :class:`LongTensor`
 
@@ -160,9 +212,18 @@ def radius_graph(
     """
 
     assert flow in ['source_to_target', 'target_to_source']
-    edge_index = radius(x, x, r, batch, batch,
-                        max_num_neighbors,
-                        num_workers, batch_size, not loop)
+    edge_index = radius(
+        x,
+        x,
+        r,
+        batch,
+        batch,
+        max_num_neighbors,
+        num_workers,
+        batch_size,
+        not loop,
+        use_triton=use_triton,
+    )
     if flow == 'source_to_target':
         return edge_index.flip(0).contiguous()
     return edge_index
