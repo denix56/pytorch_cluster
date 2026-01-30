@@ -4,7 +4,12 @@ import pytest
 import scipy.spatial
 import torch
 from torch_cluster import radius, radius_graph
-from torch_cluster.testing import devices, floating_dtypes, tensor
+from torch_cluster.testing import (
+    devices,
+    floating_dtypes,
+    has_compiler,
+    tensor,
+)
 
 
 def to_set(edge_index):
@@ -44,10 +49,19 @@ def test_radius(dtype, device):
     assert to_set(edge_index) == set([(0, 0), (0, 1), (0, 2), (0, 3), (1, 1),
                                       (1, 2), (1, 5), (1, 6)])
 
-    jit = torch.compile(radius)
-    edge_index = jit(x, y, 2, max_num_neighbors=4)
-    assert to_set(edge_index) == set([(0, 0), (0, 1), (0, 2), (0, 3), (1, 1),
-                                      (1, 2), (1, 5), (1, 6)])
+    if has_compiler():
+        jit = torch.compile(radius)
+        edge_index = jit(x, y, 2, max_num_neighbors=4)
+        assert to_set(edge_index) == set([
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 1),
+            (1, 2),
+            (1, 5),
+            (1, 6),
+        ])
 
     edge_index = radius(x, y, 2, batch_x, batch_y, max_num_neighbors=4)
     assert to_set(edge_index) == set([(0, 0), (0, 1), (0, 2), (0, 3), (1, 5),
@@ -78,10 +92,19 @@ def test_radius_graph(dtype, device):
     assert to_set(edge_index) == set([(1, 0), (3, 0), (0, 1), (2, 1), (1, 2),
                                       (3, 2), (0, 3), (2, 3)])
 
-    jit = torch.compile(radius_graph)
-    edge_index = jit(x, r=2.5, flow='source_to_target')
-    assert to_set(edge_index) == set([(1, 0), (3, 0), (0, 1), (2, 1), (1, 2),
-                                      (3, 2), (0, 3), (2, 3)])
+    if has_compiler():
+        jit = torch.compile(radius_graph)
+        edge_index = jit(x, r=2.5, flow='source_to_target')
+        assert to_set(edge_index) == set([
+            (1, 0),
+            (3, 0),
+            (0, 1),
+            (2, 1),
+            (1, 2),
+            (3, 2),
+            (0, 3),
+            (2, 3),
+        ])
 
     edge_index = radius_graph(x, r=100, flow='source_to_target',
                               max_num_neighbors=1)

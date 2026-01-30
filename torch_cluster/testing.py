@@ -1,4 +1,6 @@
 from typing import Any
+import platform
+import shutil
 
 import torch
 
@@ -27,3 +29,9 @@ def triton_wrap(dt_device_seq):
         for dt, device in dt_device_seq
         for use_triton in ([False, True] if device.type == 'cuda' else [False])
     ]
+
+
+def has_compiler() -> bool:
+    if platform.system().lower() != 'windows':
+        return True
+    return shutil.which('cl') is not None
