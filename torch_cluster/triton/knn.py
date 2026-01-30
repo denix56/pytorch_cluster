@@ -1,6 +1,4 @@
 from __future__ import annotations
-import math
-import triton
 from typing import Optional
 
 import triton
