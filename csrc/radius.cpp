@@ -41,10 +41,18 @@ TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
 }
 
 #ifdef WITH_CUDA
+inline torch::Tensor radius_cuda_wrap(torch::Tensor x, torch::Tensor y,
+                     std::optional<torch::Tensor> ptr_x,
+                     std::optional<torch::Tensor> ptr_y, double r,
+                     int64_t max_num_neighbors, int64_t num_workers,
+                     bool ignore_same_index) {
+    return radius_cuda(x, y, ptr_x, ptr_y, r, max_num_neighbors, ignore_same_index);
+}
+
 TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
-  m.impl("radius", &radius_cuda);
+  m.impl("radius", &radius_cuda_wrap);
 }
 TORCH_LIBRARY_IMPL(torch_cluster, HIP, m) {
-  m.impl("radius", &radius_cuda);
+  m.impl("radius", &radius_cuda_wrap);
 }
 #endif

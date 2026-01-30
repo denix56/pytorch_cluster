@@ -3,6 +3,20 @@ from typing import Optional
 import torch
 
 
+@torch.library.register_fake("torch_cluster::knn")
+def _(x, y, batch_x, batch_y, k, cosine = False, num_workers = 1):
+    torch._check(x.device == y.device)
+    if batch_x is not None:
+        torch._check(x.device == batch_x.device)
+        torch._check(batch_x.ndim == 1)
+    if batch_y is not None:
+        torch._check(y.device == batch_y.device)
+        torch._check(batch_y.ndim == 1)
+    ctx = torch.library.get_ctx()
+    nnz = ctx.new_dynamic_size()
+    return x.new_empty((2, nnz), dtype=torch.long)
+
+
 def knn(
     x: torch.Tensor,
     y: torch.Tensor,

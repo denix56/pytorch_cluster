@@ -5,6 +5,14 @@ from torch import Tensor
 
 import torch_cluster.typing
 
+@torch.library.register_fake("torch_cluster::fps")
+def _(src, ptr, ratio, random_start = True):
+    torch._check(src.device == ptr.device)
+    torch._check(ptr.ndim == 1)
+
+    ctx = torch.library.get_ctx()
+    nnz = ctx.new_dynamic_size()
+    return ptr.new_empty((nnz,))
 
 
 def fps(  # noqa

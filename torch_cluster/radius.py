@@ -3,6 +3,20 @@ from typing import Optional
 import torch
 
 
+@torch.library.register_fake("torch_cluster::radius")
+def _(x, y, ptr_x, ptr_y, r, max_num_neighbors=32, num_workers=1, ignore_same_index=False):
+    torch._check(x.device == y.device)
+    if ptr_x is not None:
+        torch._check(ptr_x.device == x.device)
+        torch._check(ptr_x.ndim == 1)
+    if ptr_y is not None:
+        torch._check(ptr_y.device == y.device)
+        torch._check(ptr_y.ndim == 1)
+    ctx = torch.library.get_ctx()
+    nnz = ctx.new_dynamic_size()
+    return x.new_empty((2, nnz), dtype=torch.long)
+
+
 def radius(
     x: torch.Tensor,
     y: torch.Tensor,
