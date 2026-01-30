@@ -8,7 +8,10 @@ from torch_cluster.testing import devices, grad_dtypes, tensor, triton_wrap
 
 
 @pytest.mark.skipif(
-    not (torch.cuda.is_available() and importlib.util.find_spec('triton') is not None),
+    not (
+        torch.cuda.is_available()
+        and importlib.util.find_spec('triton') is not None
+    ),
     reason='CUDA and Triton are required for Triton parity tests.',
 )
 def test_nearest_triton_matches_cuda():
@@ -32,7 +35,10 @@ def test_nearest_triton_matches_cuda():
     assert torch.equal(out_cuda, out_triton)
 
 
-@pytest.mark.parametrize('dtype,device,use_triton', triton_wrap(product(grad_dtypes, devices)))
+@pytest.mark.parametrize(
+    'dtype,device,use_triton',
+    triton_wrap(product(grad_dtypes, devices)),
+)
 def test_nearest(dtype, device, use_triton):
     x = tensor([
         [-1, -1],

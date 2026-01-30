@@ -1,3 +1,4 @@
+import importlib.util
 from typing import Optional
 
 import scipy.cluster
@@ -63,10 +64,11 @@ def nearest(
     if x.is_cuda:
         if (use_triton and x.dtype is not torch.float64
                 and y.dtype is not torch.float64):
-            try:
-                import triton
-            except ImportError:
-                print("Triton is not available. Falling back to general implementation.")
+            if importlib.util.find_spec("triton") is None:
+                print(
+                    "Triton is not available. Falling back to general "
+                    "implementation."
+                )
             else:
                 from .triton.nearest import nearest as triton_nearest
                 return triton_nearest(x, y, batch_x, batch_y)

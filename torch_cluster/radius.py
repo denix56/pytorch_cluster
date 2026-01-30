@@ -4,7 +4,16 @@ import torch
 
 
 @torch.library.register_fake("torch_cluster::radius")
-def _(x, y, ptr_x, ptr_y, r, max_num_neighbors=32, num_workers=1, ignore_same_index=False):
+def _(
+    x,
+    y,
+    ptr_x,
+    ptr_y,
+    r,
+    max_num_neighbors=32,
+    num_workers=1,
+    ignore_same_index=False,
+):
     torch._check(x.device == y.device)
     if ptr_x is not None:
         torch._check(ptr_x.device == x.device)
@@ -26,7 +35,7 @@ def radius(
     max_num_neighbors: int = 32,
     num_workers: int = 1,
     batch_size: Optional[int] = None,
-    ignore_same_index: bool = False
+    ignore_same_index: bool = False,
 ) -> torch.Tensor:
     r"""Finds for each element in :obj:`y` all points in :obj:`x` within
     distance :obj:`r`.

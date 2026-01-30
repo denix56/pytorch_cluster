@@ -49,7 +49,7 @@ def test_radius(dtype, device):
     assert to_set(edge_index) == set([(0, 0), (0, 1), (0, 2), (0, 3), (1, 1),
                                       (1, 2), (1, 5), (1, 6)])
 
-    edge_index = radius(x, y, 2, batch_x, batch_y, max_num_neighbors=4, **_triton_kwargs(device))
+    edge_index = radius(x, y, 2, batch_x, batch_y, max_num_neighbors=4)
     assert to_set(edge_index) == set([(0, 0), (0, 1), (0, 2), (0, 3), (1, 5),
                                       (1, 6)])
 

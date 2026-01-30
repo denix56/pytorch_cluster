@@ -1,10 +1,11 @@
+import importlib.util
 from typing import Optional
 
 import torch
 
 
 @torch.library.register_fake("torch_cluster::knn")
-def _(x, y, batch_x, batch_y, k, cosine = False, num_workers = 1):
+def _(x, y, batch_x, batch_y, k, cosine=False, num_workers=1):
     torch._check(x.device == y.device)
     if batch_x is not None:
         torch._check(x.device == batch_x.device)
@@ -87,10 +88,11 @@ def knn(
 
     if (use_triton and x.is_cuda and y.is_cuda
             and x.dtype is not torch.float64 and y.dtype is not torch.float64):
-        try:
-            import triton
-        except ImportError:
-            print("Triton is not available. Falling back to general implementation.")
+        if importlib.util.find_spec("triton") is None:
+            print(
+                "Triton is not available. Falling back to general "
+                "implementation."
+            )
         else:
             from .triton.knn import knn as triton_knn
             return triton_knn(x, y, k, batch_x, batch_y, cosine, batch_size)
@@ -104,8 +106,15 @@ def knn(
         ptr_x = torch.bucketize(arange, batch_x)
         ptr_y = torch.bucketize(arange, batch_y)
 
-    return torch.ops.torch_cluster.knn(x, y, ptr_x, ptr_y, k, cosine,
-                                       num_workers)
+    return torch.ops.torch_cluster.knn(
+        x,
+        y,
+        ptr_x,
+        ptr_y,
+        k,
+        cosine,
+        num_workers,
+    )
 
 
 def knn_graph(
