@@ -4,6 +4,16 @@ import scipy.cluster
 import torch
 
 
+@torch.library.register_fake("torch_cluster::nearest")
+def _(x, y, ptr_x, ptr_y):
+    torch._check(x.device == y.device)
+    torch._check(ptr_x.device == x.device)
+    torch._check(ptr_y.device == y.device)
+    torch._check(ptr_x.ndim == 1)
+    torch._check(ptr_y.ndim == 1)
+    return x.new_empty((y.size(0),), dtype=torch.long)
+
+
 def nearest(
     x: torch.Tensor,
     y: torch.Tensor,

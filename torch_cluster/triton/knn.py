@@ -1,11 +1,11 @@
 from __future__ import annotations
+import math
+import triton
 from typing import Optional
 
 import torch
 from torch import Tensor
-import triton
-
-from ._kernels import _knn_stage1_kernel, _knn_stage2_merge_kernel, _pairwise_distances
+from ._kernels import _knn_segmented_kernel
 
 
 def knn(
@@ -36,6 +36,9 @@ def knn(
     indices = knn_fused_splitN(x, y, k, batch_x, batch_y, cosine, batch_size)
     row = torch.arange(y.size(0), device=y.device).repeat_interleave(k)
     col = indices.reshape(-1)
+    valid = col >= 0
+    row = row[valid]
+    col = col[valid]
     return torch.stack([row, col], dim=0)
 
 
@@ -47,75 +50,64 @@ def knn_fused_splitN(
     batch_y: Optional[Tensor] = None,
     cosine: bool = False,
     batch_size: Optional[int] = None,
-    split_n: int = 4,
 ) -> Tensor:
     r"""Compute k-NN indices using a split-N fused Triton implementation."""
-    if k > 32:
-        distances = _pairwise_distances(x, y, batch_size=batch_size, batch_x=batch_x,
-                                        batch_y=batch_y, cosine=cosine)
-        indices = torch.argsort(distances, stable=True)[..., :k]
-        return indices
-
     use_batch = (batch_size or 1) > 1
     if use_batch:
         assert batch_x is not None
         assert batch_y is not None
         arange = torch.arange((batch_size or 1) + 1, device=x.device)
         ptr_x = torch.bucketize(arange, batch_x)
-        batch_y = batch_y.contiguous()
+        ptr_y = torch.bucketize(arange, batch_y)
     else:
-        ptr_x = x
-        batch_y = y
+        ptr_x = torch.tensor([0, x.size(0)], device=x.device, dtype=torch.int64)
+        ptr_y = torch.tensor([0, y.size(0)], device=y.device, dtype=torch.int64)
+
+    if ptr_x.numel() != ptr_y.numel():
+        raise ValueError("ptr_x and ptr_y must have the same number of segments.")
 
     M, N = y.size(0), x.size(0)
-    part_i = torch.empty((split_n, M, k), device=x.device, dtype=torch.int32)
-    part_d = torch.empty((split_n, M, k), device=x.device, dtype=torch.float32)
-    out_i = torch.empty((M, k), device=x.device, dtype=torch.int32)
-    eps = torch.finfo(part_d.dtype).eps
+    D = x.size(1)
+    if use_batch:
+        example_idx = batch_y.to(torch.int64).contiguous()
+    else:
+        y_idx = torch.arange(M, device=y.device, dtype=torch.int64)
+        if ptr_y.numel() > 2:
+            ptr_y_mid = ptr_y[1:-1].contiguous()
+        else:
+            ptr_y_mid = ptr_y.new_empty((0,))
+        example_idx = torch.bucketize(y_idx, ptr_y_mid, right=False)
 
-    def stage1_grid(meta):
-        return (triton.cdiv(M, meta['BLOCK_M']), split_n)
+    seg_sizes = torch.diff(ptr_x).to(torch.int64)
+    max_candidates = int(seg_sizes.max().item()) if seg_sizes.numel() > 0 else 0
+    k_pad = triton.next_power_of_2(2 * k)
+    eps = torch.finfo(torch.float32).eps
 
-    # Stage 1: split N into partitions and keep per-row partial top-k in registers.
-    _knn_stage1_kernel[stage1_grid](
+    row = torch.empty(M * k, device=y.device, dtype=torch.int64)
+    col = torch.full((M * k,), -1, device=y.device, dtype=torch.int64)
+
+    if max_candidates == 0:
+        return col.view(M, k)
+
+    grid = (M,)
+    _knn_segmented_kernel[grid](
         x,
         y,
-        part_i,
-        part_d,
+        ptr_x,
+        example_idx,
+        row,
+        col,
         M,
         N,
-        x.size(1),
+        D,
+        max_candidates,
         x.stride(0),
         x.stride(1),
         y.stride(0),
         y.stride(1),
-        part_i.stride(0),
-        part_i.stride(1),
-        part_i.stride(2),
-        ptr_x,
-        batch_y,
-        USE_BATCH=use_batch,
+        K=k,
+        K_PAD=k_pad,
         COSINE=cosine,
         EPS=eps,
-        K=k,
-        SPLIT_N=split_n,
     )
-
-    # Stage 2: merge partial candidates from all splits into the final top-k.
-    def stage2_grid(meta):
-        return (triton.cdiv(M, meta['BLOCK_M']),)
-
-    _knn_stage2_merge_kernel[stage2_grid](
-        part_i,
-        part_d,
-        out_i,
-        M,
-        part_i.stride(0),
-        part_i.stride(1),
-        part_i.stride(2),
-        out_i.stride(0),
-        out_i.stride(1),
-        K=k,
-        SPLIT_N=split_n,
-    )
-    return out_i
+    return col.view(M, k)

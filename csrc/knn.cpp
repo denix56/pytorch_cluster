@@ -37,10 +37,10 @@ CLUSTER_API torch::Tensor knn(torch::Tensor x, torch::Tensor y,
   }
 }
 
-torch::Tensor knn_cpu_wrap(torch::Tensor x, torch::Tensor y,
+inline torch::Tensor knn_cpu_wrap(torch::Tensor x, torch::Tensor y,
                   std::optional<torch::Tensor> ptr_x,
                   std::optional<torch::Tensor> ptr_y, int64_t k, bool cosine,
-                  int64_t num_workers) {
+                  int64_t num_workers = 1) {
     TORCH_CHECK(!cosine, "`cosine` argument not supported on CPU");
     return knn_cpu(x, y, ptr_x, ptr_y, k, num_workers);
 }
@@ -50,7 +50,7 @@ TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
 }
 
 #ifdef WITH_CUDA
-torch::Tensor knn_cuda_wrap(torch::Tensor x, torch::Tensor y,
+inline torch::Tensor knn_cuda_wrap(torch::Tensor x, torch::Tensor y,
                   std::optional<torch::Tensor> ptr_x,
                   std::optional<torch::Tensor> ptr_y, int64_t k, bool cosine,
                   int64_t num_workers) {

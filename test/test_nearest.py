@@ -1,9 +1,35 @@
+import importlib.util
 from itertools import product
 
 import pytest
 import torch
 from torch_cluster import nearest
 from torch_cluster.testing import devices, grad_dtypes, tensor, triton_wrap
+
+
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and importlib.util.find_spec('triton') is not None),
+    reason='CUDA and Triton are required for Triton parity tests.',
+)
+def test_nearest_triton_matches_cuda():
+    torch.manual_seed(123)
+    x = torch.randn(128, 8, device='cuda')
+    y = torch.randn(32, 8, device='cuda')
+    batch_x = torch.zeros(x.size(0), dtype=torch.long, device='cuda')
+    batch_y = torch.zeros(y.size(0), dtype=torch.long, device='cuda')
+
+    out_cuda = nearest(x, y, batch_x, batch_y, use_triton=False)
+    out_triton = nearest(x, y, batch_x, batch_y, use_triton=True)
+    assert torch.equal(out_cuda, out_triton)
+
+    batch_x = torch.zeros(x.size(0), dtype=torch.long, device='cuda')
+    batch_y = torch.zeros(y.size(0), dtype=torch.long, device='cuda')
+    batch_x[x.size(0) // 2:] = 1
+    batch_y[y.size(0) // 2:] = 1
+
+    out_cuda = nearest(x, y, batch_x, batch_y, use_triton=False)
+    out_triton = nearest(x, y, batch_x, batch_y, use_triton=True)
+    assert torch.equal(out_cuda, out_triton)
 
 
 @pytest.mark.parametrize('dtype,device,use_triton', triton_wrap(product(grad_dtypes, devices)))
