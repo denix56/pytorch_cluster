@@ -106,9 +106,9 @@ def _nearest_kernel(
     best_idx = tl.zeros((BLOCK_N,), dtype=tl.int32)  # Best y index.
 
     if USE_BATCH:
-        batch_id = tl.load(batch_x_ptr + offs_n, mask=mask_x, other=0)
-        left = tl.load(ptr_y_ptr + batch_id, mask=mask_x, other=0)
-        right = tl.load(ptr_y_ptr + batch_id + 1, mask=mask_x, other=0)
+        batch_id = tl.load(batch_x_ptr + offs_n, mask=mask_x, other=0)  # Batch id per x.
+        left = tl.load(ptr_y_ptr + batch_id, mask=mask_x, other=0)  # y range start.
+        right = tl.load(ptr_y_ptr + batch_id + 1, mask=mask_x, other=0)  # y range end.
     else:
         left = 0  # Full y range.
         right = M
@@ -194,7 +194,7 @@ def _nearest_kernel(
             inv_y = tl.rsqrt(y_sq + EPS)  # 1/||y||.
             dist = 1.0 - acc * (inv_y[:, None] * inv_x[None, :])
         else:
-            dist = tl.fma(-2.0, acc, y_sq[:, None] + x_sq[None, :])
+            dist = tl.fma(-2.0, acc, y_sq[:, None] + x_sq[None, :])  # L2^2 distance.
 
         if full_y:
             valid = tl.broadcast_to(mask_x[None, :], (BLOCK_M, BLOCK_N))
@@ -218,7 +218,7 @@ def _nearest_kernel(
         best_dist = tl.where(better, block_min, best_dist)
         best_idx = tl.where(better, block_idx, best_idx)
 
-    tl.store(out_ptr + offs_n, best_idx.to(tl.int64), mask=mask_x)
+    tl.store(out_ptr + offs_n, best_idx.to(tl.int64), mask=mask_x)  # Write output.
 
 
 @triton.autotune(
