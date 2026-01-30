@@ -3,6 +3,7 @@ import math
 import triton
 from typing import Optional
 
+import triton
 import torch
 from torch import Tensor
 from ._kernels import _knn_segmented_kernel
@@ -60,11 +61,21 @@ def knn_fused_splitN(
         ptr_x = torch.bucketize(arange, batch_x)
         ptr_y = torch.bucketize(arange, batch_y)
     else:
-        ptr_x = torch.tensor([0, x.size(0)], device=x.device, dtype=torch.int64)
-        ptr_y = torch.tensor([0, y.size(0)], device=y.device, dtype=torch.int64)
+        ptr_x = torch.tensor(
+            [0, x.size(0)],
+            device=x.device,
+            dtype=torch.int64,
+        )
+        ptr_y = torch.tensor(
+            [0, y.size(0)],
+            device=y.device,
+            dtype=torch.int64,
+        )
 
     if ptr_x.numel() != ptr_y.numel():
-        raise ValueError("ptr_x and ptr_y must have the same number of segments.")
+        raise ValueError(
+            "ptr_x and ptr_y must have the same number of segments."
+        )
 
     M, N = y.size(0), x.size(0)
     D = x.size(1)
@@ -79,7 +90,10 @@ def knn_fused_splitN(
         example_idx = torch.bucketize(y_idx, ptr_y_mid, right=False)
 
     seg_sizes = torch.diff(ptr_x).to(torch.int64)
-    max_candidates = int(seg_sizes.max().item()) if seg_sizes.numel() > 0 else 0
+    if seg_sizes.numel() > 0:
+        max_candidates = int(seg_sizes.max().item())
+    else:
+        max_candidates = 0
     k_pad = triton.next_power_of_2(2 * k)
     eps = torch.finfo(torch.float32).eps
 

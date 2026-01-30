@@ -8,27 +8,55 @@ import torch_cluster as tc
 nearest = tc.nearest
 
 pytestmark = pytest.mark.skipif(
-    not (torch.cuda.is_available() and importlib.util.find_spec('triton') is not None),
+    not (
+        torch.cuda.is_available()
+        and importlib.util.find_spec('triton') is not None
+    ),
     reason='CUDA and Triton are required for Triton benchmark tests.',
 )
 
+NEAREST_SIZES = [
+    (256, 128),
+    (1024, 512),
+    (4096, 2048),
+    (255, 127),
+    (256, 5),
+    (1024, 5),
+    (4096, 5),
+    (255, 5),
+]
+NEAREST_GROUPS = [1, 2, 4, 8, 16, 32]
 
-def _make_batch(num_nodes: int, num_groups: int,
-                device: torch.device) -> torch.Tensor:
+
+def _make_batch(
+    num_nodes: int,
+    num_groups: int,
+    device: torch.device,
+) -> torch.Tensor:
     groups = max(1, min(num_groups, num_nodes))
-    counts = torch.full((groups, ), num_nodes // groups, device=device,
-                        dtype=torch.long)
+    counts = torch.full(
+        (groups,),
+        num_nodes // groups,
+        device=device,
+        dtype=torch.long,
+    )
     remainder = num_nodes % groups
     if remainder:
         counts[:remainder] += 1
-    return torch.repeat_interleave(torch.arange(groups, device=device),
-                                   counts)
+    return torch.repeat_interleave(
+        torch.arange(groups, device=device),
+        counts,
+    )
 
 
-@pytest.mark.parametrize('num_x,num_y,num_groups',
-                         ((*p[0], p[1]) for p in product([(256, 128), (1024, 512), (4096, 2048), (255, 127),
-                                  (256, 5), (1024, 5), (4096, 5), (255, 5)],
-                                 [1, 2, 4, 8, 16, 32]) if p[1] <= min(p[0])))
+@pytest.mark.parametrize(
+    'num_x,num_y,num_groups',
+    (
+        (*p[0], p[1])
+        for p in product(NEAREST_SIZES, NEAREST_GROUPS)
+        if p[1] <= min(p[0])
+    ),
+)
 @pytest.mark.benchmark(group="nearest")
 def test_triton_nearest_benchmark_cuda(benchmark, num_x, num_y, num_groups):
     torch.manual_seed(123)
@@ -46,13 +74,19 @@ def test_triton_nearest_benchmark_cuda(benchmark, num_x, num_y, num_groups):
         torch.cuda.synchronize()
 
     benchmark(cuda_fn)
-    print(f"[nearest][cuda] num_x={num_x} num_y={num_y} groups={groups}")
+    print(
+        f"[nearest][cuda] num_x={num_x} num_y={num_y} groups={groups}"
+    )
 
 
-@pytest.mark.parametrize('num_x,num_y,num_groups',
-                         ((*p[0], p[1]) for p in product([(256, 128), (1024, 512), (4096, 2048), (255, 127),
-                                  (256, 5), (1024, 5), (4096, 5), (255, 5)],
-                                 [1, 2, 4, 8, 16, 32]) if p[1] <= min(p[0])))
+@pytest.mark.parametrize(
+    'num_x,num_y,num_groups',
+    (
+        (*p[0], p[1])
+        for p in product(NEAREST_SIZES, NEAREST_GROUPS)
+        if p[1] <= min(p[0])
+    ),
+)
 @pytest.mark.benchmark(group="nearest")
 def test_triton_nearest_benchmark_triton(benchmark, num_x, num_y, num_groups):
     torch.manual_seed(123)
@@ -78,4 +112,6 @@ def test_triton_nearest_benchmark_triton(benchmark, num_x, num_y, num_groups):
         torch.cuda.synchronize()
 
     benchmark(triton_fn)
-    print(f"[nearest][triton] num_x={num_x} num_y={num_y} groups={groups}")
+    print(
+        f"[nearest][triton] num_x={num_x} num_y={num_y} groups={groups}"
+    )
