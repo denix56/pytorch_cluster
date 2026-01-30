@@ -42,4 +42,7 @@ TORCH_LIBRARY_IMPL(torch_cluster, CPU, m) {
 TORCH_LIBRARY_IMPL(torch_cluster, CUDA, m) {
     m.impl("grid", &grid_cuda);
 }
+TORCH_LIBRARY_IMPL(torch_cluster, HIP, m) {
+    m.impl("grid", &grid_cuda);
+}
 #endif
