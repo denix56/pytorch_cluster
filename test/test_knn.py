@@ -5,7 +5,13 @@ import pytest
 import scipy.spatial
 import torch
 from torch_cluster import knn, knn_graph
-from torch_cluster.testing import devices, grad_dtypes, tensor, triton_wrap
+from torch_cluster.testing import (
+    devices,
+    grad_dtypes,
+    has_compiler,
+    tensor,
+    triton_wrap,
+)
 
 HAS_CUDA = torch.cuda.is_available()
 HAS_TRITON = importlib.util.find_spec('triton') is not None
@@ -41,9 +47,10 @@ def test_knn(dtype, device, use_triton):
     edge_index = knn(x, y, 2, use_triton=use_triton)
     assert to_set(edge_index) == {(0, 2), (0, 3), (1, 0), (1, 1)}
 
-    jit = torch.compile(knn)
-    edge_index = jit(x, y, 2, use_triton=use_triton)
-    assert to_set(edge_index) == {(0, 2), (0, 3), (1, 0), (1, 1)}
+    if has_compiler():
+        jit = torch.compile(knn)
+        edge_index = jit(x, y, 2, use_triton=use_triton)
+        assert to_set(edge_index) == {(0, 2), (0, 3), (1, 0), (1, 1)}
 
     edge_index = knn(x, y, 2, batch_x, batch_y, use_triton=use_triton)
     assert to_set(edge_index) == {(0, 2), (0, 3), (1, 4), (1, 5)}
@@ -113,18 +120,19 @@ def test_knn_graph(dtype, device, use_triton):
         (2, 3),
     }
 
-    jit = torch.compile(knn_graph)
-    edge_index = jit(x, k=2, flow='source_to_target')
-    assert to_set(edge_index) == {
-        (1, 0),
-        (3, 0),
-        (0, 1),
-        (2, 1),
-        (1, 2),
-        (3, 2),
-        (0, 3),
-        (2, 3),
-    }
+    if has_compiler():
+        jit = torch.compile(knn_graph)
+        edge_index = jit(x, k=2, flow='source_to_target')
+        assert to_set(edge_index) == {
+            (1, 0),
+            (3, 0),
+            (0, 1),
+            (2, 1),
+            (1, 2),
+            (3, 2),
+            (0, 3),
+            (2, 3),
+        }
 
 
 @pytest.mark.parametrize(
