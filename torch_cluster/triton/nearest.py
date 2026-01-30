@@ -27,13 +27,29 @@ def nearest(
         Tensor: Index of the nearest y for each x.
     """
     if batch_x is None and batch_y is None:
-        out = torch.empty((x.size(0), ), dtype=torch.long, device=x.device)
-        grid = lambda meta: (triton.cdiv(x.size(0), meta['BLOCK_N']), )
+        out = torch.empty((x.size(0),), dtype=torch.long, device=x.device)
+
+        def grid(meta):
+            return (triton.cdiv(x.size(0), meta['BLOCK_N']),)
+
         eps = torch.finfo(torch.float32).eps
-        _nearest_kernel[grid](x, y, out, y.size(0), x.size(0), x.size(1),
-                              x.stride(0), x.stride(1), y.stride(0),
-                              y.stride(1), y, x, USE_BATCH=False, COSINE=False,
-                              EPS=eps)
+        _nearest_kernel[grid](
+            x,
+            y,
+            out,
+            y.size(0),
+            x.size(0),
+            x.size(1),
+            x.stride(0),
+            x.stride(1),
+            y.stride(0),
+            y.stride(1),
+            y,
+            x,
+            USE_BATCH=False,
+            COSINE=False,
+            EPS=eps,
+        )
         return out
 
     if batch_x is None:
@@ -55,11 +71,27 @@ def nearest(
     else:
         ptr_y = y
         batch_x = x
-    out = torch.empty((x.size(0), ), dtype=torch.long, device=x.device)
-    grid = lambda meta: (triton.cdiv(x.size(0), meta['BLOCK_N']), )
+    out = torch.empty((x.size(0),), dtype=torch.long, device=x.device)
+
+    def grid(meta):
+        return (triton.cdiv(x.size(0), meta['BLOCK_N']),)
+
     eps = torch.finfo(torch.float32).eps
-    _nearest_kernel[grid](x, y, out, y.size(0), x.size(0), x.size(1),
-                          x.stride(0), x.stride(1), y.stride(0),
-                          y.stride(1), ptr_y, batch_x, USE_BATCH=use_batch,
-                          COSINE=False, EPS=eps)
+    _nearest_kernel[grid](
+        x,
+        y,
+        out,
+        y.size(0),
+        x.size(0),
+        x.size(1),
+        x.stride(0),
+        x.stride(1),
+        y.stride(0),
+        y.stride(1),
+        ptr_y,
+        batch_x,
+        USE_BATCH=use_batch,
+        COSINE=False,
+        EPS=eps,
+    )
     return out
