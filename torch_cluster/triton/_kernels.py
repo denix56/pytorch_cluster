@@ -99,8 +99,8 @@ def _nearest_kernel(
     offs_n = pid * BLOCK_N + tl.arange(0, BLOCK_N)  # X indices.
     mask_x = offs_n < N  # Valid x rows.
     if EVEN_N:
-        tl.multiple_of(offs_n, 8)  # Hint contiguous access.
-        tl.max_contiguous(offs_n, 8)  # Hint vectorization.
+        tl.multiple_of(offs_n, 8)
+        tl.max_contiguous(offs_n, 8)
 
     best_dist = tl.full((BLOCK_N,), float('inf'), tl.float32)  # Best dist.
     best_idx = tl.zeros((BLOCK_N,), dtype=tl.int32)  # Best y index.
