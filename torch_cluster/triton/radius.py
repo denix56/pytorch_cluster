@@ -75,31 +75,17 @@ def radius(
     else:
         max_candidates = 0
 
-    row = torch.full(
-        (M * max_num_neighbors,),
-        -1,
-        device=y.device,
-        dtype=torch.int64,
-    )
-    col = torch.full(
-        (M * max_num_neighbors,),
-        -1,
-        device=y.device,
-        dtype=torch.int64,
-    )
-
     if max_candidates == 0 or max_num_neighbors <= 0:
-        mask = row != -1
-        return torch.stack([row[mask], col[mask]], dim=0)
+        return torch.empty(2, 0, device=x.device, dtype=torch.int64)
 
+    grid_out = torch.full((2, M * max_num_neighbors), -1, device=x.device, dtype=torch.int64)
     grid = (M,)
     _radius_segmented_kernel[grid](
         x,
         y,
         ptr_x,
         example_idx,
-        row,
-        col,
+        grid_out,
         M,
         N,
         D,
@@ -113,5 +99,4 @@ def radius(
         IGNORE_SAME_INDEX=ignore_same_index,
     )
 
-    mask = row != -1
-    return torch.stack([row[mask], col[mask]], dim=0)
+    return grid_out[:, grid_out[0] != -1]
