@@ -32,7 +32,7 @@ def knn(
     Returns:
         Tensor: Edge index with shape [2, M * k].
     """
-    indices = segmented_topk_search(
+    grid = segmented_topk_search(
         x,
         y,
         k,
@@ -41,9 +41,4 @@ def knn(
         cosine,
         batch_size,
     )
-    row = torch.arange(y.size(0), device=y.device).repeat_interleave(k)
-    col = indices.reshape(-1)
-    valid = col >= 0
-    row = row[valid]
-    col = col[valid]
-    return torch.stack([row, col], dim=0)
+    return grid[:, grid[1] >= 0]

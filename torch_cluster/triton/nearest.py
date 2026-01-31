@@ -49,6 +49,7 @@ def nearest(
             USE_BATCH=False,
             COSINE=False,
             EPS=eps,
+            INPUT_PRECISION="ieee",
         )
         return out
 
@@ -93,5 +94,6 @@ def nearest(
         USE_BATCH=use_batch,
         COSINE=False,
         EPS=eps,
+        INPUT_PRECISION="ieee",
     )
     return out

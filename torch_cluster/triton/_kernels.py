@@ -7,19 +7,13 @@ from triton.language.extra import libdevice
 
 
 def _prune_knn_configs(configs, args, **kwargs):
-    d = int(args.get('D', 0))
-    max_cand = int(args.get('MAX_CAND', 0))
+    k_pad = int(args.get("K", 0))
     pruned = []
     for cfg in configs:
-        block_n = cfg.kwargs.get('BLOCK_N', 0)
-        block_d = cfg.kwargs.get('BLOCK_D', 0)
-        if max_cand > 0 and block_n > max_cand:
-            continue
-        if d > 0 and block_d > d:
+        block_n = cfg.kwargs.get("BLOCK_N", 0)
+        if block_n < k_pad:
             continue
         pruned.append(cfg)
-    if not pruned:
-        pruned = [min(configs, key=lambda c: c.kwargs.get('BLOCK_N', 0))]
     return pruned
 
 
@@ -79,6 +73,7 @@ def _nearest_kernel(
     USE_BATCH: tl.constexpr,
     COSINE: tl.constexpr,
     EPS: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -135,7 +130,6 @@ def _nearest_kernel(
         right = M
 
     x_sq = tl.zeros((BLOCK_N,), dtype=tl.float32)  # ||x||^2.
-    x_sq_c = tl.zeros((BLOCK_N,), dtype=tl.float32)
     x_block_ptr_sq = tl.make_block_ptr(
         base=x_ptr,
         shape=(D, N),
@@ -153,11 +147,7 @@ def _nearest_kernel(
                 boundary_check=(0, 1),
                 padding_option="zero",
             )
-        x_term = tl.sum(x * x, axis=0)
-        x_y = x_term - x_sq_c
-        x_t = x_sq + x_y
-        x_sq_c = (x_t - x_sq) - x_y
-        x_sq = x_t
+        x_sq += tl.sum(x * x, axis=0)
         x_block_ptr_sq = tl.advance(x_block_ptr_sq, (BLOCK_K, 0))
     if COSINE:
         inv_x = tl.rsqrt(x_sq + EPS)  # 1/||x||.
@@ -177,9 +167,7 @@ def _nearest_kernel(
         full_y = y_start + BLOCK_M <= M  # Full tile.
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)  # Dot acc.
-        acc_c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         y_sq = tl.zeros((BLOCK_M,), dtype=tl.float32)  # ||y||^2.
-        y_sq_c = tl.zeros((BLOCK_M,), dtype=tl.float32)
 
         x_block_ptr = x_block_ptr_base
         y_block_ptr = tl.make_block_ptr(
@@ -211,16 +199,8 @@ def _nearest_kernel(
                     boundary_check=(0, 1),
                     padding_option="zero",
                 )
-            dot_term = tl.dot(y, x, input_precision="ieee")
-            dot_y = dot_term - acc_c
-            dot_t = acc + dot_y
-            acc_c = (dot_t - acc) - dot_y
-            acc = dot_t
-            y_term = tl.sum(y * y, axis=1)
-            y_y = y_term - y_sq_c
-            y_t = y_sq + y_y
-            y_sq_c = (y_t - y_sq) - y_y
-            y_sq = y_t
+            acc += tl.dot(y, x, input_precision=INPUT_PRECISION)
+            y_sq += tl.sum(y * y, axis=1)
             y_block_ptr = tl.advance(y_block_ptr, (0, BLOCK_K))
             x_block_ptr = tl.advance(x_block_ptr, (BLOCK_K, 0))
 
@@ -308,7 +288,7 @@ def _nearest_kernel(
         ),
     ],
     key=['D', 'MAX_CAND'],
-    # prune_configs_by={'early_config_prune': _prune_knn_configs},
+    prune_configs_by={'early_config_prune': _prune_knn_configs},
 )
 @triton.heuristics({
     'NUM_D_BLOCKS': lambda args: triton.cdiv(args['D'], args['BLOCK_D']),
@@ -317,15 +297,15 @@ def _nearest_kernel(
         args['BLOCK_N'],
     ),
     'EVEN_D': lambda args: args['D'] % args['BLOCK_D'] == 0,
+    'K_PAD': lambda args: triton.next_power_of_2(args['K'])
 })
 @triton.jit
 def _knn_segmented_kernel(
     x_ptr,
     y_ptr,
     ptr_x_ptr,
-    example_idx_ptr,
-    row_ptr,
-    col_ptr,
+    batch_y_ptr,
+    grid_ptr,
     M,
     N,
     D,
@@ -336,6 +316,8 @@ def _knn_segmented_kernel(
     stride_yd,
     K: tl.constexpr,
     K_PAD: tl.constexpr,
+    USE_BATCH: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     NUM_D_BLOCKS: tl.constexpr,
@@ -350,20 +332,22 @@ def _knn_segmented_kernel(
     mask_y = n_y < M  # Mask for valid y.
 
     k_offsets = tl.arange(0, K_PAD)  # Offsets for padded top-k buffer.
-    k_mask = k_offsets < K  # Mask for real k.
-    inf_bits = tl.full(
-        (K_PAD,),
-        float("inf"),
-        tl.float32,
-    ).to(tl.int32, bitcast=True)
-    best_dist_bits = inf_bits  # Best distances (bitcast).
-    best_idx = tl.full((K_PAD,), -1, tl.int32)  # Best indices.
+    INF_KEY = 0x7f800000ffffffff
 
-    example_idx = tl.load(
-        example_idx_ptr + n_y,
-        mask=mask_y,
-        other=0,
-    )  # Segment id.
+    best_dist_key = tl.full(
+        (K_PAD,),
+        INF_KEY,
+        tl.int64,
+    )
+
+    if USE_BATCH:
+        example_idx = tl.load(
+            batch_y_ptr + n_y,
+            mask=mask_y,
+            other=0,
+        )  # Segment id.
+    else:
+        example_idx = 0
     x_start = tl.load(
         ptr_x_ptr + example_idx,
         mask=mask_y,
@@ -376,7 +360,6 @@ def _knn_segmented_kernel(
     )  # Segment end.
     if COSINE:
         y_sq = tl.zeros((1,), tl.float32)  # ||y||^2 accumulator.
-        y_sq_c = tl.zeros((1,), tl.float32)
         y_norm_ptr = tl.make_block_ptr(
             base=y_ptr,
             shape=(D, M),
@@ -394,22 +377,9 @@ def _knn_segmented_kernel(
                     boundary_check=(0, 1),
                     padding_option="zero",
                 )  # Tail D.
-            y_term = tl.sum(y * y, axis=0)
-            y_y = y_term - y_sq_c
-            y_t = y_sq + y_y
-            y_sq_c = (y_t - y_sq) - y_y
-            y_sq = y_t
+            y_sq += tl.sum(y * y, axis=0)
             y_norm_ptr = tl.advance(y_norm_ptr, (BLOCK_D, 0))
         y_rnorm = tl.rsqrt(y_sq + EPS)  # 1/||y|| for cosine.
-
-    if stride_xm % 8 == 0:
-        tl.multiple_of(stride_xm, 8)  # Hint alignment.
-    if stride_xd % 8 == 0:
-        tl.multiple_of(stride_xd, 8)
-    if stride_ym % 8 == 0:
-        tl.multiple_of(stride_ym, 8)
-    if stride_yd % 8 == 0:
-        tl.multiple_of(stride_yd, 8)
 
     for xb in range(MAX_X_BLOCKS):
         x_block_start = x_start + xb * BLOCK_N  # Start of x block.
@@ -430,12 +400,11 @@ def _knn_segmented_kernel(
         tl.multiple_of(offs_n, 8)  # Hint vectorization.
         tl.max_contiguous(offs_n, 8)
 
-        acc_dot = tl.zeros((BLOCK_N,), tl.float32)  # Dot accumulator.
-        acc_dot_c = tl.zeros((BLOCK_N,), tl.float32)
-        acc_x_sq = tl.zeros((BLOCK_N,), tl.float32)  # ||x||^2 accumulator.
-        acc_x_sq_c = tl.zeros((BLOCK_N,), tl.float32)
-        acc_dist = tl.zeros((BLOCK_N,), tl.float32)
-        acc_dist_c = tl.zeros((BLOCK_N,), tl.float32)
+        if COSINE:
+            acc_dot = tl.zeros((BLOCK_N,), tl.float32)  # Dot accumulator.
+            acc_x_sq = tl.zeros((BLOCK_N,), tl.float32)  # ||x||^2 accumulator.
+        else:
+            acc_dist = tl.zeros((BLOCK_N,), tl.float32)
         x_block_start_i32 = x_block_start.to(
             tl.int32
         )  # Block ptr needs int32 offsets.
@@ -483,28 +452,15 @@ def _knn_segmented_kernel(
                     padding_option="zero",
                 )
             if COSINE:
-                prod = tl.dot(x, y, input_precision='ieee')  # MxV dot.
-                dot_term = tl.sum(prod, axis=1)
-                dot_y = dot_term - acc_dot_c
-                dot_t = acc_dot + dot_y
-                acc_dot_c = (dot_t - acc_dot) - dot_y
-                acc_dot = dot_t
-                x_term = tl.sum(x * x, axis=1)
-                x_y = x_term - acc_x_sq_c
-                x_t = acc_x_sq + x_y
-                acc_x_sq_c = (x_t - acc_x_sq) - x_y
-                acc_x_sq = x_t
-                x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))
+                prod = tl.dot(x, y, input_precision=INPUT_PRECISION)  # MxV dot.
+                acc_dot += tl.sum(prod, axis=1)
+                acc_x_sq += tl.sum(x * x, axis=1)
                 y_block_ptr = tl.advance(y_block_ptr, (BLOCK_D, 0))
             else:
                 diff = x - y
-                term = tl.sum(diff * diff, axis=1)
-                y_k = term - acc_dist_c
-                t_k = acc_dist + y_k
-                acc_dist_c = (t_k - acc_dist) - y_k
-                acc_dist = t_k
-                x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))
+                acc_dist += tl.sum(diff * diff, axis=1)
                 y_block_ptr = tl.advance(y_block_ptr, (0, BLOCK_D))
+            x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))
         if COSINE:
             x_rnorm = tl.rsqrt(acc_x_sq + EPS)  # 1/||x||.
             dist = 1.0 - acc_dot * (x_rnorm * y_rnorm)  # Cosine distance.
@@ -520,53 +476,35 @@ def _knn_segmented_kernel(
                 same_idx = same_idx & mask_x
             dist = tl.where(same_idx, float("inf"), dist)
 
-
         dist_bits = dist.to(tl.int32, bitcast=True)
         dist_bits = dist_bits.to(tl.int64)  # Pack dist.
         idx_bits = x_idx.to(tl.int32).to(tl.int64) & 0xFFFFFFFF  # Pack idx.
         key = (dist_bits << 32) | idx_bits  # Lexicographic key.
         sorted_key = tl.sort(key, descending=False)  # Full block sort.
-
-        k_valid = k_offsets < K  # Only first k entries are valid.
         key_k = tl.gather(sorted_key, k_offsets, axis=0)  # Take first k keys.
-        dist_k_bits = (key_k >> 32).to(tl.int32)  # Unpack dist bits.
-        idx_k = (key_k & 0xFFFFFFFF).to(tl.int32)  # Unpack idx.
-        block_top_bits = tl.where(k_valid, dist_k_bits, inf_bits)
-        block_top_idx = tl.where(k_valid, idx_k, -1)  # Block top-k idx.
 
-        shift_idx = k_offsets - K  # Shift window for block top-k.
-        shift_valid = (k_offsets >= K) & (k_offsets < (2 * K))
-        shift_idx_safe = tl.where(shift_valid, shift_idx, 0)
-        shift_bits = tl.gather(block_top_bits, shift_idx_safe, axis=0)
-        block_shifted_bits = tl.where(shift_valid, shift_bits, inf_bits)
-        shift_idx_val = tl.gather(block_top_idx, shift_idx_safe, axis=0)
-        block_shifted_idx = tl.where(shift_valid, shift_idx_val, -1)
-        combo_bits = tl.where(
-            k_offsets < K,
-            best_dist_bits,
-            block_shifted_bits,
+        combo_key = tl.cat(
+            best_dist_key,
+            key_k,
+            can_reorder=True
         )  # Merge buffers.
-        combo_idx = tl.where(k_offsets < K, best_idx, block_shifted_idx)
-        dist_bits = combo_bits.to(tl.int64)  # Pack combo.
-        idx_bits = combo_idx.to(tl.int32).to(tl.int64) & 0xFFFFFFFF
-        combo_key = (dist_bits << 32) | idx_bits
         sorted_key = tl.sort(combo_key, descending=False)  # Sort 2K keys.
-        best_key = tl.gather(sorted_key, k_offsets, axis=0)  # Keep best K.
-        best_dist_bits = (best_key >> 32).to(tl.int32)
-        best_idx = (best_key & 0xFFFFFFFF).to(tl.int32)
+        best_dist_key = tl.gather(sorted_key, k_offsets, axis=0)  # Keep best K.
 
-    best_dist = best_dist_bits.to(tl.float32, bitcast=True)
-    best_idx = tl.where(
-        libdevice.isinf(best_dist),
-        -1,
-        best_idx,
-    )  # Mask invalid.
+    k_mask = k_offsets < K  # Mask for real k.
+    best_dist_key = tl.where(k_mask, best_dist_key, INF_KEY)
+    best_idx = (best_dist_key & 0xFFFFFFFF)
 
-    out_offsets = n_y * K + tl.where(k_mask, k_offsets, 0)  # Output offsets.
+    out_offsets = n_y * K + k_offsets  # Output offsets.
     out_mask = mask_y & k_mask  # Valid output mask.
-    tl.store(row_ptr + out_offsets, n_y, mask=out_mask)  # Write row ids.
+
     tl.store(
-        col_ptr + out_offsets,
+        grid_ptr + out_offsets,
+        n_y,
+        mask=out_mask,
+    )
+    tl.store(
+        grid_ptr + M * K + out_offsets,
         best_idx.to(tl.int64),
         mask=out_mask,
     )  # Write col idx.
@@ -689,7 +627,6 @@ def _radius_segmented_kernel(
         tl.max_contiguous(offs_n, 8)
 
         acc_dist = tl.zeros((BLOCK_N,), tl.float32)
-        acc_dist_c = tl.zeros((BLOCK_N,), tl.float32)
         x_block_start_i32 = x_block_start.to(tl.int32)
         x_block_ptr = tl.make_block_ptr(
             base=x_ptr,
@@ -725,16 +662,13 @@ def _radius_segmented_kernel(
                 )
 
             diff = x - y
-            term = tl.sum(diff * diff, axis=1)
-            y_k = term - acc_dist_c
-            t_k = acc_dist + y_k
-            acc_dist_c = (t_k - acc_dist) - y_k
-            acc_dist = t_k
+            acc_dist += tl.sum(diff * diff, axis=1)
             x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))
             y_row_ptr = tl.advance(y_row_ptr, (0, BLOCK_D))
 
+        dist = acc_dist
         active = count < max_neighbors
-        mask = mask_x & (acc_dist < R2) & active
+        mask = mask_x & (dist < R2) & active
         if IGNORE_SAME_INDEX:
             mask &= x_idx != n_y.to(tl.int64)
 
