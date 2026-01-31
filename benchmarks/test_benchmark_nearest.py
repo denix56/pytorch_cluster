@@ -31,6 +31,7 @@ NEAREST_SIZES = [
 NEAREST_GROUPS = [1, 2, 4, 8, 16, 32]
 FEATURES = [8, 64, 200]
 
+
 def _assert_nearest_within_cuda(
     out_cuda: torch.Tensor,
     out_triton: torch.Tensor,

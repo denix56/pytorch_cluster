@@ -1,7 +1,6 @@
 from __future__ import annotations
 from typing import Optional
 
-import torch
 from torch import Tensor
 
 from .segmented import segmented_topk_search
