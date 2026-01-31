@@ -17,11 +17,9 @@ def segmented_topk_search(
     batch_y: Optional[Tensor] = None,
     cosine: bool = False,
     batch_size: Optional[int] = None,
-    radius: Optional[float] = None,
     ignore_same_index: bool = False,
-    match_cuda: bool = True,
 ) -> Tensor:
-    r"""Compute top-k neighbor indices with an optional radius constraint."""
+    r"""Compute top-k neighbor indices."""
     use_batch = (batch_size or 1) > 1
     if use_batch:
         assert batch_x is not None
@@ -64,16 +62,13 @@ def segmented_topk_search(
     else:
         max_candidates = 0
     k_pad = triton.next_power_of_2(2 * k)
-    eps = torch.finfo(torch.float32).eps
+    eps = 0.0 if cosine else torch.finfo(torch.float32).eps
 
     row = torch.empty(M * k, device=y.device, dtype=torch.int64)
     col = torch.full((M * k,), -1, device=y.device, dtype=torch.int64)
 
     if max_candidates == 0:
         return col.view(M, k)
-
-    use_radius = radius is not None
-    r2 = float(radius) * float(radius) if use_radius else 0.0
 
     grid = (M,)
     _knn_segmented_kernel[grid](
@@ -91,13 +86,10 @@ def segmented_topk_search(
         x.stride(1),
         y.stride(0),
         y.stride(1),
-        r2,
         K=k,
         K_PAD=k_pad,
         COSINE=cosine,
         EPS=eps,
-        USE_RADIUS=use_radius,
         IGNORE_SAME_INDEX=ignore_same_index,
-        MATCH_CUDA=match_cuda,
     )
     return col.view(M, k)

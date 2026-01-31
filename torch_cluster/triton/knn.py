@@ -15,7 +15,6 @@ def knn(
     batch_y: Optional[Tensor] = None,
     cosine: bool = False,
     batch_size: Optional[int] = None,
-    match_cuda: bool = True,
 ) -> Tensor:
     r"""Compute k-NN indices using Triton kernels.
 
@@ -41,7 +40,6 @@ def knn(
         batch_y,
         cosine,
         batch_size,
-        match_cuda=match_cuda,
     )
     row = torch.arange(y.size(0), device=y.device).repeat_interleave(k)
     col = indices.reshape(-1)

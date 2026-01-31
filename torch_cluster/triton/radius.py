@@ -17,7 +17,6 @@ def radius(
     max_num_neighbors: int = 32,
     batch_size: Optional[int] = None,
     ignore_same_index: bool = False,
-    match_cuda: bool = True,
 ) -> Tensor:
     r"""Find all neighbors within a radius using Triton kernels.
 
@@ -112,7 +111,6 @@ def radius(
         float(r) * float(r),
         max_num_neighbors,
         IGNORE_SAME_INDEX=ignore_same_index,
-        MATCH_CUDA=match_cuda,
     )
 
     mask = row != -1

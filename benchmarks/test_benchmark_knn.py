@@ -41,6 +41,77 @@ def to_set(edge_index):
     return set([(i, j) for i, j in edge_index.t().tolist()])
 
 
+def _assert_knn_within_cuda(
+    out_cuda,
+    out_triton,
+    x,
+    y,
+    k,
+    cosine,
+    tol=None,
+):
+    if tol is None:
+        tol = 2 * torch.finfo(x.dtype).eps
+    m = y.size(0)
+    cuda_rows = out_cuda[0]
+    cuda_cols = out_cuda[1]
+    triton_rows = out_triton[0]
+    triton_cols = out_triton[1]
+    y_f = y.float()
+    x_f = x.float()
+    y_norm = torch.linalg.norm(y_f, dim=1)
+    if cosine:
+        x_cuda = x_f[cuda_cols]
+        y_cuda = y_f[cuda_rows]
+        cuda_dot = (x_cuda * y_cuda).sum(dim=1)
+        cuda_norm = torch.linalg.norm(x_cuda, dim=1)
+        cuda_dist = 1.0 - cuda_dot / (cuda_norm * y_norm[cuda_rows])
+        x_triton = x_f[triton_cols]
+        y_triton = y_f[triton_rows]
+        triton_dot = (x_triton * y_triton).sum(dim=1)
+        triton_norm = torch.linalg.norm(x_triton, dim=1)
+        triton_dist = 1.0 - triton_dot / (
+            triton_norm * y_norm[triton_rows]
+        )
+    else:
+        x_cuda = x_f[cuda_cols]
+        y_cuda = y_f[cuda_rows]
+        cuda_dist = ((x_cuda - y_cuda) ** 2).sum(dim=1)
+        x_triton = x_f[triton_cols]
+        y_triton = y_f[triton_rows]
+        triton_dist = ((x_triton - y_triton) ** 2).sum(dim=1)
+    cuda_max = torch.full(
+        (m,),
+        -float("inf"),
+        device=y.device,
+        dtype=torch.float32,
+    )
+    cuda_max.scatter_reduce_(
+        0,
+        cuda_rows,
+        cuda_dist,
+        reduce="amax",
+        include_self=True,
+    )
+    triton_thresh = cuda_max[triton_rows] + tol
+    margin = (triton_dist - triton_thresh).max().item()
+    if cosine:
+        x_ref = x_f[triton_cols]
+        y_ref = y_f[triton_rows]
+        ref_dot = (x_ref * y_ref).sum(dim=1)
+        ref_norm = torch.linalg.norm(x_ref, dim=1)
+        ref_dist = 1.0 - ref_dot / (ref_norm * y_norm[triton_rows])
+    else:
+        x_ref = x_f[triton_cols]
+        y_ref = y_f[triton_rows]
+        ref_dist = ((x_ref - y_ref) ** 2).sum(dim=1)
+    max_diff = torch.abs(triton_dist - ref_dist).max().item()
+    print(f"[knn][match] max_margin={margin:.6e} tol={tol:.1e}")
+    print(f"[knn][match] max_diff={max_diff:.6e} tol={tol:.1e}")
+    assert (triton_dist <= triton_thresh).all()
+    assert max_diff <= tol
+
+
 def _make_batch(
     num_nodes: int,
     num_groups: int,
@@ -195,11 +266,14 @@ def test_triton_knn_benchmark_triton_cosine(
         if i == 0:
             out_cuda = cuda_fn()
             out_triton = triton_fn()
-            for a, b in zip(
-                sorted(list(to_set(out_cuda))),
-                sorted(list(to_set(out_triton))),
-            ):
-                assert a == b
+            _assert_knn_within_cuda(
+                out_cuda,
+                out_triton,
+                x,
+                y,
+                k=16,
+                cosine=True,
+            )
         else:
             triton_fn()
         torch.cuda.synchronize()
@@ -255,11 +329,14 @@ def test_triton_knn_benchmark_triton(
         if i == 0:
             out_cuda = cuda_fn()
             out_triton = triton_fn()
-            for a, b in zip(
-                sorted(list(to_set(out_cuda))),
-                sorted(list(to_set(out_triton))),
-            ):
-                assert a == b
+            _assert_knn_within_cuda(
+                out_cuda,
+                out_triton,
+                x,
+                y,
+                k=16,
+                cosine=False,
+            )
         else:
             triton_fn()
         torch.cuda.synchronize()

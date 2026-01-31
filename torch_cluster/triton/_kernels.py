@@ -25,6 +25,15 @@ def _prune_knn_configs(configs, args, **kwargs):
 
 @triton.autotune(
     configs=[
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 16},
+                      num_warps=2,
+                      num_stages=2),
+        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 64, 'BLOCK_K': 16},
+                      num_warps=2,
+                      num_stages=2),
+        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 32, 'BLOCK_K': 16},
+                      num_warps=2,
+                      num_stages=2),
         triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'BLOCK_K': 32},
                       num_warps=4,
                       num_stages=3),
@@ -126,6 +135,7 @@ def _nearest_kernel(
         right = M
 
     x_sq = tl.zeros((BLOCK_N,), dtype=tl.float32)  # ||x||^2.
+    x_sq_c = tl.zeros((BLOCK_N,), dtype=tl.float32)
     x_block_ptr_sq = tl.make_block_ptr(
         base=x_ptr,
         shape=(D, N),
@@ -143,7 +153,11 @@ def _nearest_kernel(
                 boundary_check=(0, 1),
                 padding_option="zero",
             )
-        x_sq += tl.sum(x * x, axis=0)
+        x_term = tl.sum(x * x, axis=0)
+        x_y = x_term - x_sq_c
+        x_t = x_sq + x_y
+        x_sq_c = (x_t - x_sq) - x_y
+        x_sq = x_t
         x_block_ptr_sq = tl.advance(x_block_ptr_sq, (BLOCK_K, 0))
     if COSINE:
         inv_x = tl.rsqrt(x_sq + EPS)  # 1/||x||.
@@ -163,7 +177,9 @@ def _nearest_kernel(
         full_y = y_start + BLOCK_M <= M  # Full tile.
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)  # Dot acc.
+        acc_c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         y_sq = tl.zeros((BLOCK_M,), dtype=tl.float32)  # ||y||^2.
+        y_sq_c = tl.zeros((BLOCK_M,), dtype=tl.float32)
 
         x_block_ptr = x_block_ptr_base
         y_block_ptr = tl.make_block_ptr(
@@ -176,29 +192,35 @@ def _nearest_kernel(
         )
 
         for _ in range(0, D, BLOCK_K):
-            if full_y and EVEN_K:
+            full_tile = full_y & EVEN_K
+            if full_tile:
                 y = tl.load(y_block_ptr)  # Full tile.
-                if EVEN_N:
-                    x = tl.load(x_block_ptr)  # Full tile.
-                else:
-                    x = tl.load(
-                        x_block_ptr,
-                        boundary_check=(0, 1),
-                        padding_option="zero",
-                    )
             else:
                 y = tl.load(
                     y_block_ptr,
                     boundary_check=(0, 1),
                     padding_option="zero",
                 )
+
+            full_x = full_tile & EVEN_N
+            if full_x:
+                x = tl.load(x_block_ptr)  # Full tile.
+            else:
                 x = tl.load(
                     x_block_ptr,
                     boundary_check=(0, 1),
                     padding_option="zero",
                 )
-            acc += tl.dot(y, x, input_precision="ieee")
-            y_sq += tl.sum(y * y, axis=1)
+            dot_term = tl.dot(y, x, input_precision="ieee")
+            dot_y = dot_term - acc_c
+            dot_t = acc + dot_y
+            acc_c = (dot_t - acc) - dot_y
+            acc = dot_t
+            y_term = tl.sum(y * y, axis=1)
+            y_y = y_term - y_sq_c
+            y_t = y_sq + y_y
+            y_sq_c = (y_t - y_sq) - y_y
+            y_sq = y_t
             y_block_ptr = tl.advance(y_block_ptr, (0, BLOCK_K))
             x_block_ptr = tl.advance(x_block_ptr, (BLOCK_K, 0))
 
@@ -206,11 +228,7 @@ def _nearest_kernel(
             inv_y = tl.rsqrt(y_sq + EPS)  # 1/||y||.
             dist = 1.0 - acc * (inv_y[:, None] * inv_x[None, :])
         else:
-            dist = tl.fma(
-                -2.0,
-                acc,
-                y_sq[:, None] + x_sq[None, :],
-            )  # L2^2 distance.
+            dist = y_sq[:, None] + x_sq[None, :] - 2.0 * acc
 
         if full_y:
             valid = tl.broadcast_to(mask_x[None, :], (BLOCK_M, BLOCK_N))
@@ -289,7 +307,7 @@ def _nearest_kernel(
             num_stages=4,
         ),
     ],
-    key=['D', 'MAX_CAND', 'MATCH_CUDA'],
+    key=['D', 'MAX_CAND'],
     # prune_configs_by={'early_config_prune': _prune_knn_configs},
 )
 @triton.heuristics({
@@ -316,7 +334,6 @@ def _knn_segmented_kernel(
     stride_xd,
     stride_ym,
     stride_yd,
-    R2,
     K: tl.constexpr,
     K_PAD: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -326,9 +343,7 @@ def _knn_segmented_kernel(
     EVEN_D: tl.constexpr,
     COSINE: tl.constexpr,
     EPS: tl.constexpr,
-    USE_RADIUS: tl.constexpr,
     IGNORE_SAME_INDEX: tl.constexpr,
-    MATCH_CUDA: tl.constexpr,
 ):
     pid = tl.program_id(0)  # Program id over y rows.
     n_y = pid  # Current y index.
@@ -359,38 +374,33 @@ def _knn_segmented_kernel(
         mask=mask_y,
         other=0,
     )  # Segment end.
-    y_sq = tl.zeros((1,), tl.float32)  # ||y||^2 accumulator.
     if COSINE:
-        if MATCH_CUDA:
-            for nd in range(NUM_D_BLOCKS):
-                for dd in range(BLOCK_D):
-                    d_idx = nd * BLOCK_D + dd
-                    mask_d = d_idx < D
-                    y_ptrs = y_ptr + n_y * stride_ym + d_idx * stride_yd
-                    y_val = tl.load(y_ptrs, mask=mask_y & mask_d)
-                    y_sq += y_val * y_val
-            y_norm = tl.sqrt(y_sq + EPS)
-        else:
-            y_norm_ptr = tl.make_block_ptr(
-                base=y_ptr,
-                shape=(D, M),
-                strides=(stride_yd, stride_ym),
-                offsets=(0, n_y),
-                block_shape=(BLOCK_D, 1),
-                order=(0, 1),
-            )
-            for yi in range(NUM_D_BLOCKS):
-                if EVEN_D:
-                    y = tl.load(y_norm_ptr)  # Full load for y.
-                else:
-                    y = tl.load(
-                        y_norm_ptr,
-                        boundary_check=(0, 1),
-                        padding_option="zero",
-                    )  # Tail D.
-                y_sq += tl.sum(y * y, axis=0)  # Accumulate ||y||^2.
-                y_norm_ptr = tl.advance(y_norm_ptr, (BLOCK_D, 0))
-            y_rnorm = tl.rsqrt(y_sq + EPS)  # 1/||y|| for cosine.
+        y_sq = tl.zeros((1,), tl.float32)  # ||y||^2 accumulator.
+        y_sq_c = tl.zeros((1,), tl.float32)
+        y_norm_ptr = tl.make_block_ptr(
+            base=y_ptr,
+            shape=(D, M),
+            strides=(stride_yd, stride_ym),
+            offsets=(0, n_y),
+            block_shape=(BLOCK_D, 1),
+            order=(0, 1),
+        )
+        for yi in range(NUM_D_BLOCKS):
+            if EVEN_D:
+                y = tl.load(y_norm_ptr)  # Full load for y.
+            else:
+                y = tl.load(
+                    y_norm_ptr,
+                    boundary_check=(0, 1),
+                    padding_option="zero",
+                )  # Tail D.
+            y_term = tl.sum(y * y, axis=0)
+            y_y = y_term - y_sq_c
+            y_t = y_sq + y_y
+            y_sq_c = (y_t - y_sq) - y_y
+            y_sq = y_t
+            y_norm_ptr = tl.advance(y_norm_ptr, (BLOCK_D, 0))
+        y_rnorm = tl.rsqrt(y_sq + EPS)  # 1/||y|| for cosine.
 
     if stride_xm % 8 == 0:
         tl.multiple_of(stride_xm, 8)  # Hint alignment.
@@ -421,8 +431,11 @@ def _knn_segmented_kernel(
         tl.max_contiguous(offs_n, 8)
 
         acc_dot = tl.zeros((BLOCK_N,), tl.float32)  # Dot accumulator.
+        acc_dot_c = tl.zeros((BLOCK_N,), tl.float32)
         acc_x_sq = tl.zeros((BLOCK_N,), tl.float32)  # ||x||^2 accumulator.
-        acc_dist = tl.zeros((BLOCK_N,), tl.float32)  # L2^2 accumulator.
+        acc_x_sq_c = tl.zeros((BLOCK_N,), tl.float32)
+        acc_dist = tl.zeros((BLOCK_N,), tl.float32)
+        acc_dist_c = tl.zeros((BLOCK_N,), tl.float32)
         x_block_start_i32 = x_block_start.to(
             tl.int32
         )  # Block ptr needs int32 offsets.
@@ -436,15 +449,14 @@ def _knn_segmented_kernel(
             order=(1, 0),
         )
         if COSINE:
-            if not MATCH_CUDA:
-                y_block_ptr = tl.make_block_ptr(
-                    base=y_ptr,
-                    shape=(D, M),
-                    strides=(stride_yd, stride_ym),
-                    offsets=(0, n_y_i32),
-                    block_shape=(BLOCK_D, 1),
-                    order=(0, 1),
-                )
+            y_block_ptr = tl.make_block_ptr(
+                base=y_ptr,
+                shape=(D, M),
+                strides=(stride_yd, stride_ym),
+                offsets=(0, n_y_i32),
+                block_shape=(BLOCK_D, 1),
+                order=(0, 1),
+            )
         else:
             y_block_ptr = tl.make_block_ptr(
                 base=y_ptr,
@@ -456,73 +468,46 @@ def _knn_segmented_kernel(
             )
 
         for nd in range(NUM_D_BLOCKS):
-            if COSINE:
-                if MATCH_CUDA:
-                    for dd in range(BLOCK_D):
-                        d_idx = nd * BLOCK_D + dd
-                        mask_d = d_idx < D
-                        x_ptrs = x_ptr + x_idx * stride_xm + d_idx * stride_xd
-                        y_ptrs = y_ptr + n_y * stride_ym + d_idx * stride_yd
-                        x_val = tl.load(x_ptrs, mask=mask_x & mask_d)
-                        y_val = tl.load(y_ptrs, mask=mask_y & mask_d)
-                        acc_dot += x_val * y_val
-                        acc_x_sq += x_val * x_val
-                else:
-                    if EVEN_D:
-                        x = tl.load(x_block_ptr)  # Full load for x.
-                        y = tl.load(y_block_ptr)  # Full load for y.
-                    else:
-                        x = tl.load(
-                            x_block_ptr,
-                            boundary_check=(0, 1),
-                            padding_option="zero",
-                        )  # Tail D.
-                        y = tl.load(
-                            y_block_ptr,
-                            boundary_check=(0, 1),
-                            padding_option="zero",
-                        )
-                    prod = tl.dot(x, y, input_precision='ieee')  # MxV dot.
-                    acc_dot += tl.sum(prod, axis=1)  # Reduce over D.
-                    acc_x_sq += tl.sum(x * x, axis=1)  # ||x||^2.
+            if EVEN_D:
+                x = tl.load(x_block_ptr)  # Full load for x.
+                y = tl.load(y_block_ptr)  # Full load for y.
             else:
-                if MATCH_CUDA:
-                    for dd in range(BLOCK_D):
-                        d_idx = nd * BLOCK_D + dd
-                        mask_d = d_idx < D
-                        x_ptrs = x_ptr + x_idx * stride_xm + d_idx * stride_xd
-                        y_ptrs = y_ptr + n_y * stride_ym + d_idx * stride_yd
-                        x_val = tl.load(x_ptrs, mask=mask_x & mask_d)
-                        y_val = tl.load(y_ptrs, mask=mask_y & mask_d)
-                        diff = x_val - y_val
-                        acc_dist += diff * diff
-                else:
-                    if EVEN_D:
-                        x = tl.load(x_block_ptr)  # Full load for x.
-                        y = tl.load(y_block_ptr)  # Full load for y.
-                    else:
-                        x = tl.load(
-                            x_block_ptr,
-                            boundary_check=(0, 1),
-                            padding_option="zero",
-                        )  # Tail D.
-                        y = tl.load(
-                            y_block_ptr,
-                            boundary_check=(0, 1),
-                            padding_option="zero",
-                        )
-                    diff = x - y
-                    acc_dist += tl.sum(diff * diff, axis=1)
-            x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))  # Next D tile.
-            if COSINE and not MATCH_CUDA:
+                x = tl.load(
+                    x_block_ptr,
+                    boundary_check=(0, 1),
+                    padding_option="zero",
+                )  # Tail D.
+                y = tl.load(
+                    y_block_ptr,
+                    boundary_check=(0, 1),
+                    padding_option="zero",
+                )
+            if COSINE:
+                prod = tl.dot(x, y, input_precision='ieee')  # MxV dot.
+                dot_term = tl.sum(prod, axis=1)
+                dot_y = dot_term - acc_dot_c
+                dot_t = acc_dot + dot_y
+                acc_dot_c = (dot_t - acc_dot) - dot_y
+                acc_dot = dot_t
+                x_term = tl.sum(x * x, axis=1)
+                x_y = x_term - acc_x_sq_c
+                x_t = acc_x_sq + x_y
+                acc_x_sq_c = (x_t - acc_x_sq) - x_y
+                acc_x_sq = x_t
+                x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))
                 y_block_ptr = tl.advance(y_block_ptr, (BLOCK_D, 0))
-
+            else:
+                diff = x - y
+                term = tl.sum(diff * diff, axis=1)
+                y_k = term - acc_dist_c
+                t_k = acc_dist + y_k
+                acc_dist_c = (t_k - acc_dist) - y_k
+                acc_dist = t_k
+                x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))
+                y_block_ptr = tl.advance(y_block_ptr, (0, BLOCK_D))
         if COSINE:
             x_rnorm = tl.rsqrt(acc_x_sq + EPS)  # 1/||x||.
-            if MATCH_CUDA:
-                dist = 1.0 - acc_dot / (tl.sqrt(acc_x_sq + EPS) * y_norm)
-            else:
-                dist = 1.0 - acc_dot * (x_rnorm * y_rnorm)  # Cosine distance.
+            dist = 1.0 - acc_dot * (x_rnorm * y_rnorm)  # Cosine distance.
         else:
             dist = acc_dist  # L2^2 distance.
 
@@ -535,10 +520,9 @@ def _knn_segmented_kernel(
                 same_idx = same_idx & mask_x
             dist = tl.where(same_idx, float("inf"), dist)
 
-        if USE_RADIUS:
-            dist = tl.where(dist <= R2, dist, float("inf"))
 
-        dist_bits = dist.to(tl.int32, bitcast=True).to(tl.int64)  # Pack dist.
+        dist_bits = dist.to(tl.int32, bitcast=True)
+        dist_bits = dist_bits.to(tl.int64)  # Pack dist.
         idx_bits = x_idx.to(tl.int32).to(tl.int64) & 0xFFFFFFFF  # Pack idx.
         key = (dist_bits << 32) | idx_bits  # Lexicographic key.
         sorted_key = tl.sort(key, descending=False)  # Full block sort.
@@ -645,7 +629,6 @@ def _radius_segmented_kernel(
     R2,
     MAX_NEIGHBORS,
     IGNORE_SAME_INDEX: tl.constexpr,
-    MATCH_CUDA: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     NUM_D_BLOCKS: tl.constexpr,
@@ -684,7 +667,6 @@ def _radius_segmented_kernel(
     count = tl.zeros((), dtype=tl.int32)
     max_neighbors = MAX_NEIGHBORS.to(tl.int32)
     n_y_i32 = n_y.to(tl.int32)
-
     xb = 0
     while (xb < MAX_X_BLOCKS) & (count < max_neighbors):
         x_block_start = x_start + xb * BLOCK_N
@@ -707,6 +689,7 @@ def _radius_segmented_kernel(
         tl.max_contiguous(offs_n, 8)
 
         acc_dist = tl.zeros((BLOCK_N,), tl.float32)
+        acc_dist_c = tl.zeros((BLOCK_N,), tl.float32)
         x_block_start_i32 = x_block_start.to(tl.int32)
         x_block_ptr = tl.make_block_ptr(
             base=x_ptr,
@@ -726,33 +709,27 @@ def _radius_segmented_kernel(
         )
 
         for nd in tl.static_range(NUM_D_BLOCKS):
-            if MATCH_CUDA:
-                for dd in range(BLOCK_D):
-                    d_idx = nd * BLOCK_D + dd
-                    mask_d = d_idx < D
-                    x_ptrs = x_ptr + x_idx * stride_xm + d_idx * stride_xd
-                    y_ptrs = y_ptr + n_y * stride_ym + d_idx * stride_yd
-                    x_val = tl.load(x_ptrs, mask=mask_x & mask_d)
-                    y_val = tl.load(y_ptrs, mask=mask_y & mask_d)
-                    diff = x_val - y_val
-                    acc_dist += diff * diff
+            if EVEN_D:
+                x = tl.load(x_block_ptr)
+                y = tl.load(y_row_ptr)
             else:
-                if EVEN_D:
-                    x = tl.load(x_block_ptr)
-                    y = tl.load(y_row_ptr)
-                else:
-                    x = tl.load(
-                        x_block_ptr,
-                        boundary_check=(0, 1),
-                        padding_option="zero",
-                    )
-                    y = tl.load(
-                        y_row_ptr,
-                        boundary_check=(0, 1),
-                        padding_option="zero",
-                    )
-                diff = x - y
-                acc_dist += tl.sum(diff * diff, axis=1)
+                x = tl.load(
+                    x_block_ptr,
+                    boundary_check=(0, 1),
+                    padding_option="zero",
+                )
+                y = tl.load(
+                    y_row_ptr,
+                    boundary_check=(0, 1),
+                    padding_option="zero",
+                )
+
+            diff = x - y
+            term = tl.sum(diff * diff, axis=1)
+            y_k = term - acc_dist_c
+            t_k = acc_dist + y_k
+            acc_dist_c = (t_k - acc_dist) - y_k
+            acc_dist = t_k
             x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))
             y_row_ptr = tl.advance(y_row_ptr, (0, BLOCK_D))
 
