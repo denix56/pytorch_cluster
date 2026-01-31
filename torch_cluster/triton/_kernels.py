@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import triton
 import triton.language as tl
-from triton.language.extra import libdevice
 
 
 def _prune_knn_configs(configs, args, **kwargs):
@@ -452,7 +451,11 @@ def _knn_segmented_kernel(
                     padding_option="zero",
                 )
             if COSINE:
-                prod = tl.dot(x, y, input_precision=INPUT_PRECISION)  # MxV dot.
+                prod = tl.dot(
+                    x,
+                    y,
+                    input_precision=INPUT_PRECISION,
+                )  # MxV dot.
                 acc_dot += tl.sum(prod, axis=1)
                 acc_x_sq += tl.sum(x * x, axis=1)
                 y_block_ptr = tl.advance(y_block_ptr, (BLOCK_D, 0))
@@ -489,7 +492,11 @@ def _knn_segmented_kernel(
             can_reorder=True
         )  # Merge buffers.
         sorted_key = tl.sort(combo_key, descending=False)  # Sort 2K keys.
-        best_dist_key = tl.gather(sorted_key, k_offsets, axis=0)  # Keep best K.
+        best_dist_key = tl.gather(
+            sorted_key,
+            k_offsets,
+            axis=0,
+        )  # Keep best K.
 
     k_mask = k_offsets < K  # Mask for real k.
     best_dist_key = tl.where(k_mask, best_dist_key, INF_KEY)
