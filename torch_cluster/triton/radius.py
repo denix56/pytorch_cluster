@@ -78,7 +78,12 @@ def radius(
     if max_candidates == 0 or max_num_neighbors <= 0:
         return torch.empty(2, 0, device=x.device, dtype=torch.int64)
 
-    grid_out = torch.full((2, M * max_num_neighbors), -1, device=x.device, dtype=torch.int64)
+    grid_out = torch.full(
+        (2, M * max_num_neighbors),
+        -1,
+        device=x.device,
+        dtype=torch.int64,
+    )
     grid = (M,)
     _radius_segmented_kernel[grid](
         x,
