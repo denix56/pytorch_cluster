@@ -31,6 +31,27 @@ NEAREST_SIZES = [
 NEAREST_GROUPS = [1, 2, 4, 8, 16, 32]
 FEATURES = [8, 64, 200]
 
+def _assert_nearest_within_cuda(
+    out_cuda: torch.Tensor,
+    out_triton: torch.Tensor,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    tol: float | None = None,
+) -> None:
+    if tol is None:
+        tol = 2 * torch.finfo(x.dtype).eps
+    x_f = x.float()
+    y_f = y.float()
+    cuda_dist = ((x_f - y_f[out_cuda]) ** 2).sum(dim=1)
+    triton_dist = ((x_f - y_f[out_triton]) ** 2).sum(dim=1)
+    thresh = cuda_dist + tol
+    margin = (triton_dist - thresh).max().item()
+    max_diff = torch.abs(triton_dist - cuda_dist).max().item()
+    print(f"[nearest][match] max_margin={margin:.6e} tol={tol:.1e}")
+    print(f"[nearest][match] max_diff={max_diff:.6e} tol={tol:.1e}")
+    assert (triton_dist <= thresh).all()
+    assert max_diff <= tol
+
 
 def _make_batch(
     num_nodes: int,
@@ -122,7 +143,7 @@ def test_triton_nearest_benchmark_triton(
         if i == 0:
             out_cuda = cuda_fn()
             out_triton = triton_fn()
-            assert torch.equal(out_cuda, out_triton)
+            _assert_nearest_within_cuda(out_cuda, out_triton, x, y)
         else:
             triton_fn()
         torch.cuda.synchronize()

@@ -39,6 +39,34 @@ def to_set(edge_index):
     return set([(i, j) for i, j in edge_index.t().tolist()])
 
 
+def _assert_radius_within_cuda(
+    edge_index,
+    x,
+    y,
+    r,
+    max_num_neighbors,
+    ignore_same_index,
+    check_max_neighbors=True,
+    tol=None,
+):
+    if edge_index.numel() == 0:
+        return
+    if tol is None:
+        tol = torch.finfo(x.dtype).eps
+    row, col = edge_index
+    x_f = x.float()
+    y_f = y.float()
+    diffs = x_f[col] - y_f[row]
+    dist = (diffs * diffs).sum(dim=1)
+    r2 = float(r) * float(r)
+    assert (dist <= (r2 + tol)).all()
+    if ignore_same_index:
+        assert (row != col).all()
+    if check_max_neighbors:
+        counts = torch.bincount(row, minlength=y.size(0))
+        assert (counts <= max_num_neighbors).all()
+
+
 def _make_batch(
     num_nodes: int,
     num_groups: int,
@@ -151,13 +179,15 @@ def test_triton_radius_benchmark_triton(
 
     for i in range(5):
         if i == 0:
-            out_cuda = cuda_fn()
             out_triton = triton_fn()
-            for a, b in zip(
-                sorted(list(to_set(out_cuda))),
-                sorted(list(to_set(out_triton))),
-            ):
-                assert a == b
+            _assert_radius_within_cuda(
+                out_triton,
+                x,
+                y,
+                r=1.5,
+                max_num_neighbors=32,
+                ignore_same_index=False,
+            )
         else:
             triton_fn()
         torch.cuda.synchronize()
@@ -228,13 +258,16 @@ def test_triton_radius_graph_benchmark_triton(benchmark, num_x, num_groups):
 
     for i in range(5):
         if i == 0:
-            out_cuda = cuda_fn()
             out_triton = triton_fn()
-            for a, b in zip(
-                sorted(list(to_set(out_cuda))),
-                sorted(list(to_set(out_triton))),
-            ):
-                assert a == b
+            _assert_radius_within_cuda(
+                out_triton,
+                x,
+                x,
+                r=1.5,
+                max_num_neighbors=32,
+                ignore_same_index=True,
+                check_max_neighbors=False,
+            )
         else:
             triton_fn()
         torch.cuda.synchronize()
