@@ -381,15 +381,6 @@ def _knn_segmented_kernel(
             y_norm_ptr = tl.advance(y_norm_ptr, (BLOCK_D, 0))
         y_rnorm = tl.rsqrt(y_sq + EPS)  # 1/||y|| for cosine.
 
-    # if stride_xm % 8 == 0:
-    #     tl.multiple_of(stride_xm, 8)  # Hint alignment.
-    # if stride_xd % 8 == 0:
-    #     tl.multiple_of(stride_xd, 8)
-    # if stride_ym % 8 == 0:
-    #     tl.multiple_of(stride_ym, 8)
-    # if stride_yd % 8 == 0:
-    #     tl.multiple_of(stride_yd, 8)
-
     for xb in range(MAX_X_BLOCKS):
         x_block_start = x_start + xb * BLOCK_N  # Start of x block.
         offs_n = tl.arange(0, BLOCK_N)  # Offsets within block.
