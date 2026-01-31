@@ -561,8 +561,7 @@ def _radius_segmented_kernel(
     y_ptr,
     ptr_x_ptr,
     example_idx_ptr,
-    row_ptr,
-    col_ptr,
+    grid_ptr,
     M,
     N,
     D,
@@ -652,7 +651,7 @@ def _radius_segmented_kernel(
             order=(0, 1),
         )
 
-        for nd in tl.static_range(NUM_D_BLOCKS):
+        for nd in range(NUM_D_BLOCKS):
             if EVEN_D:
                 x = tl.load(x_block_ptr)
                 y = tl.load(y_row_ptr)
@@ -684,7 +683,7 @@ def _radius_segmented_kernel(
         write = mask & (pos < max_neighbors)
         pos_safe = tl.where(write, pos, 0)
         out_offset = n_y * MAX_NEIGHBORS + pos_safe
-        tl.store(row_ptr + out_offset, n_y, mask=write)
-        tl.store(col_ptr + out_offset, x_idx, mask=write)
+        tl.store(grid_ptr + out_offset, n_y, mask=write)
+        tl.store(grid_ptr + M * MAX_NEIGHBORS + out_offset, x_idx, mask=write)
         count += tl.sum(write, axis=0).to(tl.int32)
         xb += 1
