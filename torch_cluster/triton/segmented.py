@@ -47,37 +47,26 @@ def segmented_topk_search(
     M, N = y.size(0), x.size(0)
     D = x.size(1)
     if use_batch:
-        example_idx = batch_y.to(torch.int64).contiguous()
-    else:
-        y_idx = torch.arange(M, device=y.device, dtype=torch.int64)
-        if ptr_y.numel() > 2:
-            ptr_y_mid = ptr_y[1:-1].contiguous()
-        else:
-            ptr_y_mid = ptr_y.new_empty((0,))
-        example_idx = torch.bucketize(y_idx, ptr_y_mid, right=False)
+        batch_y = batch_y.to(torch.int64).contiguous()
 
     seg_sizes = torch.diff(ptr_x).to(torch.int64)
     if seg_sizes.numel() > 0:
         max_candidates = int(seg_sizes.max().item())
     else:
         max_candidates = 0
-    k_pad = triton.next_power_of_2(2 * k)
     eps = 0.0 if cosine else torch.finfo(torch.float32).eps
 
-    row = torch.empty(M * k, device=y.device, dtype=torch.int64)
-    col = torch.full((M * k,), -1, device=y.device, dtype=torch.int64)
-
     if max_candidates == 0:
-        return col.view(M, k)
+        return torch.full((2, M * k), -1, device=y.device, dtype=torch.int64)
 
+    grid_out = torch.empty(2, M * k, device=y.device, dtype=torch.int64)
     grid = (M,)
     _knn_segmented_kernel[grid](
         x,
         y,
         ptr_x,
-        example_idx,
-        row,
-        col,
+        batch_y if use_batch else ptr_x,  # dummy ptr when unused
+        grid_out,
         M,
         N,
         D,
@@ -87,9 +76,10 @@ def segmented_topk_search(
         y.stride(0),
         y.stride(1),
         K=k,
-        K_PAD=k_pad,
+        USE_BATCH=use_batch,
+        INPUT_PRECISION="ieee",
         COSINE=cosine,
         EPS=eps,
         IGNORE_SAME_INDEX=ignore_same_index,
     )
-    return col.view(M, k)
+    return grid_out
