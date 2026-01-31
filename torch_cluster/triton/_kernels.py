@@ -5,17 +5,6 @@ import triton
 import triton.language as tl
 
 
-def _prune_knn_configs(configs, args, **kwargs):
-    k_pad = int(args.get("K", 0))
-    pruned = []
-    for cfg in configs:
-        block_n = cfg.kwargs.get("BLOCK_N", 0)
-        if block_n < k_pad:
-            continue
-        pruned.append(cfg)
-    return pruned
-
-
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 16},
@@ -251,11 +240,6 @@ def _nearest_kernel(
             num_stages=3,
         ),
         triton.Config(
-            {'BLOCK_N': 32, 'BLOCK_D': 16},
-            num_warps=2,
-            num_stages=4,
-        ),
-        triton.Config(
             {'BLOCK_N': 32, 'BLOCK_D': 32},
             num_warps=2,
             num_stages=2,
@@ -287,7 +271,6 @@ def _nearest_kernel(
         ),
     ],
     key=['D', 'MAX_CAND'],
-    prune_configs_by={'early_config_prune': _prune_knn_configs},
 )
 @triton.heuristics({
     'NUM_D_BLOCKS': lambda args: triton.cdiv(args['D'], args['BLOCK_D']),

@@ -16,6 +16,8 @@ from torch_cluster.testing import (
 HAS_CUDA = torch.cuda.is_available()
 HAS_TRITON = importlib.util.find_spec('triton') is not None
 
+torch._dynamo.config.capture_scalar_outputs = True
+
 
 def to_set(edge_index):
     return set([(i, j) for i, j in edge_index.t().tolist()])
