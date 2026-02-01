@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 
 @triton.autotune(
@@ -118,6 +119,7 @@ def _nearest_kernel(
         right = M
 
     x_sq = tl.zeros((BLOCK_N,), dtype=tl.float32)  # ||x||^2.
+    x_sq_c = tl.zeros((BLOCK_N,), dtype=tl.float32)
     x_block_ptr_sq = tl.make_block_ptr(
         base=x_ptr,
         shape=(D, N),
@@ -135,7 +137,15 @@ def _nearest_kernel(
                 boundary_check=(0, 1),
                 padding_option="zero",
             )
-        x_sq += tl.sum(x * x, axis=0)
+        x_term = tl.sum(x * x, axis=0)
+        x_t = x_sq + x_term
+        x_cond = tl.abs(x_sq) >= tl.abs(x_term)
+        x_sq_c += tl.where(
+            x_cond,
+            (x_sq - x_t) + x_term,
+            (x_term - x_t) + x_sq,
+        )
+        x_sq = x_t
         x_block_ptr_sq = tl.advance(x_block_ptr_sq, (BLOCK_K, 0))
     if COSINE:
         inv_x = tl.rsqrt(x_sq + EPS)  # 1/||x||.
@@ -155,7 +165,9 @@ def _nearest_kernel(
         full_y = y_start + BLOCK_M <= M  # Full tile.
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)  # Dot acc.
+        acc_c = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         y_sq = tl.zeros((BLOCK_M,), dtype=tl.float32)  # ||y||^2.
+        y_sq_c = tl.zeros((BLOCK_M,), dtype=tl.float32)
 
         x_block_ptr = x_block_ptr_base
         y_block_ptr = tl.make_block_ptr(
@@ -187,16 +199,36 @@ def _nearest_kernel(
                     boundary_check=(0, 1),
                     padding_option="zero",
                 )
-            acc += tl.dot(y, x, input_precision=INPUT_PRECISION)
-            y_sq += tl.sum(y * y, axis=1)
+            dot_term = tl.dot(y, x, input_precision=INPUT_PRECISION)
+            dot_t = acc + dot_term
+            dot_cond = tl.abs(acc) >= tl.abs(dot_term)
+            acc_c += tl.where(
+                dot_cond,
+                (acc - dot_t) + dot_term,
+                (dot_term - dot_t) + acc,
+            )
+            acc = dot_t
+            y_term = tl.sum(y * y, axis=1)
+            y_t = y_sq + y_term
+            y_cond = tl.abs(y_sq) >= tl.abs(y_term)
+            y_sq_c += tl.where(
+                y_cond,
+                (y_sq - y_t) + y_term,
+                (y_term - y_t) + y_sq,
+            )
+            y_sq = y_t
             y_block_ptr = tl.advance(y_block_ptr, (0, BLOCK_K))
             x_block_ptr = tl.advance(x_block_ptr, (BLOCK_K, 0))
 
         if COSINE:
-            inv_y = tl.rsqrt(y_sq + EPS)  # 1/||y||.
+            inv_y = tl.rsqrt(y_sq + y_sq_c + EPS)  # 1/||y||.
             dist = 1.0 - acc * (inv_y[:, None] * inv_x[None, :])
         else:
-            dist = y_sq[:, None] + x_sq[None, :] - 2.0 * acc
+            dist = (
+                (y_sq + y_sq_c)[:, None]
+                + (x_sq + x_sq_c)[None, :]
+                - 2.0 * acc
+            )
 
         if full_y:
             valid = tl.broadcast_to(mask_x[None, :], (BLOCK_M, BLOCK_N))
@@ -279,7 +311,12 @@ def _nearest_kernel(
         args['BLOCK_N'],
     ),
     'EVEN_D': lambda args: args['D'] % args['BLOCK_D'] == 0,
-    'K_PAD': lambda args: triton.next_power_of_2(args['K'])
+    'N_BLOCKS_PER_K': (
+        lambda args: max(
+            1,
+            triton.next_power_of_2(args['K']) // args['BLOCK_N'],
+        )
+    ),
 })
 @triton.jit
 def _knn_segmented_kernel(
@@ -297,7 +334,6 @@ def _knn_segmented_kernel(
     stride_ym,
     stride_yd,
     K: tl.constexpr,
-    K_PAD: tl.constexpr,
     USE_BATCH: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -308,19 +344,33 @@ def _knn_segmented_kernel(
     COSINE: tl.constexpr,
     EPS: tl.constexpr,
     IGNORE_SAME_INDEX: tl.constexpr,
+    N_BLOCKS_PER_K: tl.constexpr,
 ):
     pid = tl.program_id(0)  # Program id over y rows.
     n_y = pid  # Current y index.
     mask_y = n_y < M  # Mask for valid y.
 
-    k_offsets = tl.arange(0, K_PAD)  # Offsets for padded top-k buffer.
+    k_offsets = tl.arange(
+        0,
+        N_BLOCKS_PER_K * BLOCK_N,
+    )  # Offsets for padded top-k buffer.
     INF_KEY = 0x7f800000ffffffff
 
     best_dist_key = tl.full(
-        (K_PAD,),
+        (N_BLOCKS_PER_K * BLOCK_N,),
         INF_KEY,
         tl.int64,
     )
+
+    if N_BLOCKS_PER_K > 1:
+        acc_key = tl.full(
+            (N_BLOCKS_PER_K, BLOCK_N),
+            INF_KEY,
+            tl.int64,
+        )
+        k_rows = tl.arange(0, N_BLOCKS_PER_K)[:, None].broadcast_to(
+            (N_BLOCKS_PER_K, BLOCK_N)
+        )
 
     if USE_BATCH:
         example_idx = tl.load(
@@ -342,6 +392,7 @@ def _knn_segmented_kernel(
     )  # Segment end.
     if COSINE:
         y_sq = tl.zeros((1,), tl.float32)  # ||y||^2 accumulator.
+        y_sq_c = tl.zeros((1,), tl.float32)
         y_norm_ptr = tl.make_block_ptr(
             base=y_ptr,
             shape=(D, M),
@@ -359,7 +410,15 @@ def _knn_segmented_kernel(
                     boundary_check=(0, 1),
                     padding_option="zero",
                 )  # Tail D.
-            y_sq += tl.sum(y * y, axis=0)
+            y_term = tl.sum(y * y, axis=0)
+            y_t = y_sq + y_term
+            y_cond = tl.abs(y_sq) >= tl.abs(y_term)
+            y_sq_c += tl.where(
+                y_cond,
+                (y_sq - y_t) + y_term,
+                (y_term - y_t) + y_sq,
+            )
+            y_sq = y_t
             y_norm_ptr = tl.advance(y_norm_ptr, (BLOCK_D, 0))
         y_rnorm = tl.rsqrt(y_sq + EPS)  # 1/||y|| for cosine.
 
@@ -384,9 +443,12 @@ def _knn_segmented_kernel(
 
         if COSINE:
             acc_dot = tl.zeros((BLOCK_N,), tl.float32)  # Dot accumulator.
+            acc_dot_c = tl.zeros((BLOCK_N,), tl.float32)
             acc_x_sq = tl.zeros((BLOCK_N,), tl.float32)  # ||x||^2 accumulator.
+            acc_x_sq_c = tl.zeros((BLOCK_N,), tl.float32)
         else:
             acc_dist = tl.zeros((BLOCK_N,), tl.float32)
+            acc_dist_c = tl.zeros((BLOCK_N,), tl.float32)
         x_block_start_i32 = x_block_start.to(
             tl.int32
         )  # Block ptr needs int32 offsets.
@@ -439,19 +501,43 @@ def _knn_segmented_kernel(
                     y,
                     input_precision=INPUT_PRECISION,
                 )  # MxV dot.
-                acc_dot += tl.sum(prod, axis=1)
-                acc_x_sq += tl.sum(x * x, axis=1)
+                dot_term = tl.sum(prod, axis=1)
+                dot_t = acc_dot + dot_term
+                dot_cond = tl.abs(acc_dot) >= tl.abs(dot_term)
+                acc_dot_c += tl.where(
+                    dot_cond,
+                    (acc_dot - dot_t) + dot_term,
+                    (dot_term - dot_t) + acc_dot,
+                )
+                acc_dot = dot_t
+                x_term = tl.sum(x * x, axis=1)
+                x_t = acc_x_sq + x_term
+                x_cond = tl.abs(acc_x_sq) >= tl.abs(x_term)
+                acc_x_sq_c += tl.where(
+                    x_cond,
+                    (acc_x_sq - x_t) + x_term,
+                    (x_term - x_t) + acc_x_sq,
+                )
+                acc_x_sq = x_t
                 y_block_ptr = tl.advance(y_block_ptr, (BLOCK_D, 0))
             else:
                 diff = x - y
-                acc_dist += tl.sum(diff * diff, axis=1)
+                term = tl.sum(diff * diff, axis=1)
+                t_k = acc_dist + term
+                k_cond = tl.abs(acc_dist) >= tl.abs(term)
+                acc_dist_c += tl.where(
+                    k_cond,
+                    (acc_dist - t_k) + term,
+                    (term - t_k) + acc_dist,
+                )
+                acc_dist = t_k
                 y_block_ptr = tl.advance(y_block_ptr, (0, BLOCK_D))
             x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))
         if COSINE:
-            x_rnorm = tl.rsqrt(acc_x_sq + EPS)  # 1/||x||.
+            x_rnorm = tl.rsqrt(acc_x_sq + acc_x_sq_c + EPS)  # 1/||x||.
             dist = 1.0 - acc_dot * (x_rnorm * y_rnorm)  # Cosine distance.
         else:
-            dist = acc_dist  # L2^2 distance.
+            dist = acc_dist + acc_dist_c  # L2^2 distance.
 
         if not full_block:
             dist = tl.where(mask_x, dist, float("inf"))  # Mask invalid x.
@@ -460,30 +546,45 @@ def _knn_segmented_kernel(
             same_idx = x_idx == n_y
             if not full_block:
                 same_idx = same_idx & mask_x
-            dist = tl.where(same_idx, float("inf"), dist)
 
         dist_bits = dist.to(tl.int32, bitcast=True)
         dist_bits = dist_bits.to(tl.int64)  # Pack dist.
         idx_bits = x_idx.to(tl.int32).to(tl.int64) & 0xFFFFFFFF  # Pack idx.
         key = (dist_bits << 32) | idx_bits  # Lexicographic key.
-        sorted_key = tl.sort(key, descending=False)  # Full block sort.
-        key_k = tl.gather(sorted_key, k_offsets, axis=0)  # Take first k keys.
+        key = tl.where(libdevice.isinf(dist), INF_KEY, key)
 
-        combo_key = tl.cat(
-            best_dist_key,
-            key_k,
-            can_reorder=True
-        )  # Merge buffers.
-        sorted_key = tl.sort(combo_key, descending=False)  # Sort 2K keys.
-        best_dist_key = tl.gather(
-            sorted_key,
-            k_offsets,
-            axis=0,
-        )  # Keep best K.
+        absorb = False
+        if N_BLOCKS_PER_K > 1:
+            row = xb % N_BLOCKS_PER_K
+            acc_key = tl.where(k_rows == row, key[None, :], acc_key)
+            if row == (N_BLOCKS_PER_K - 1) or xb == (MAX_X_BLOCKS - 1):
+                absorb = True
+                final_key = acc_key.ravel()
+                acc_key = tl.full(
+                    (N_BLOCKS_PER_K, BLOCK_N),
+                    INF_KEY,
+                    tl.int64,
+                )
+        else:
+            absorb = True
+            final_key = key
+
+        if absorb:
+            combo_key = tl.cat(
+                best_dist_key,
+                final_key,
+                can_reorder=True
+            )  # Merge buffers.
+            sorted_key = tl.sort(combo_key, descending=False)  # Sort 2K keys.
+            best_dist_key = tl.gather(
+                sorted_key,
+                k_offsets,
+                axis=0,
+            )  # Keep best K.
 
     k_mask = k_offsets < K  # Mask for real k.
     best_dist_key = tl.where(k_mask, best_dist_key, INF_KEY)
-    best_idx = (best_dist_key & 0xFFFFFFFF)
+    best_idx = (best_dist_key & 0xFFFFFFFF).to(tl.int32)
 
     out_offsets = n_y * K + k_offsets  # Output offsets.
     out_mask = mask_y & k_mask  # Valid output mask.
@@ -616,6 +717,7 @@ def _radius_segmented_kernel(
         tl.max_contiguous(offs_n, 8)
 
         acc_dist = tl.zeros((BLOCK_N,), tl.float32)
+        acc_dist_c = tl.zeros((BLOCK_N,), tl.float32)
         x_block_start_i32 = x_block_start.to(tl.int32)
         x_block_ptr = tl.make_block_ptr(
             base=x_ptr,
@@ -651,11 +753,19 @@ def _radius_segmented_kernel(
                 )
 
             diff = x - y
-            acc_dist += tl.sum(diff * diff, axis=1)
+            term = tl.sum(diff * diff, axis=1)
+            t_k = acc_dist + term
+            k_cond = tl.abs(acc_dist) >= tl.abs(term)
+            acc_dist_c += tl.where(
+                k_cond,
+                (acc_dist - t_k) + term,
+                (term - t_k) + acc_dist,
+            )
+            acc_dist = t_k
             x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_D))
             y_row_ptr = tl.advance(y_row_ptr, (0, BLOCK_D))
 
-        dist = acc_dist
+        dist = acc_dist + acc_dist_c
         active = count < max_neighbors
         mask = mask_x & (dist < R2) & active
         if IGNORE_SAME_INDEX:
