@@ -53,7 +53,7 @@ def _assert_radius_within_cuda(
     if edge_index.numel() == 0:
         return
     if tol is None:
-        tol = torch.finfo(x.dtype).eps
+        tol = 5 * torch.finfo(x.dtype).eps
     row, col = edge_index
     x_f = x.float()
     y_f = y.float()

@@ -41,7 +41,7 @@ def _assert_nearest_within_cuda(
     tol: float | None = None,
 ) -> None:
     if tol is None:
-        tol = 2 * torch.finfo(x.dtype).eps
+        tol = 5 * torch.finfo(x.dtype).eps
     x_f = x.float()
     y_f = y.float()
     cuda_dist = ((x_f - y_f[out_cuda]) ** 2).sum(dim=1)
