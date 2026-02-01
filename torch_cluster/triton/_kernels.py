@@ -147,6 +147,7 @@ def _nearest_kernel(
         )
         x_sq = x_t
         x_block_ptr_sq = tl.advance(x_block_ptr_sq, (BLOCK_K, 0))
+    x_sq += x_sq_c
     if COSINE:
         inv_x = tl.rsqrt(x_sq + EPS)  # 1/||x||.
 
@@ -220,13 +221,15 @@ def _nearest_kernel(
             y_block_ptr = tl.advance(y_block_ptr, (0, BLOCK_K))
             x_block_ptr = tl.advance(x_block_ptr, (BLOCK_K, 0))
 
+        acc += acc_c
+        y_sq += y_sq_c
         if COSINE:
-            inv_y = tl.rsqrt(y_sq + y_sq_c + EPS)  # 1/||y||.
+            inv_y = tl.rsqrt(y_sq + EPS)  # 1/||y||.
             dist = 1.0 - acc * (inv_y[:, None] * inv_x[None, :])
         else:
             dist = (
-                (y_sq + y_sq_c)[:, None]
-                + (x_sq + x_sq_c)[None, :]
+                (y_sq)[:, None]
+                + (x_sq)[None, :]
                 - 2.0 * acc
             )
 

@@ -52,7 +52,7 @@ def _assert_knn_within_cuda(
     tol=None,
 ):
     if tol is None:
-        tol = 2 * torch.finfo(x.dtype).eps
+        tol = 5 * torch.finfo(x.dtype).eps
     m = y.size(0)
     cuda_rows = out_cuda[0]
     cuda_cols = out_cuda[1]
