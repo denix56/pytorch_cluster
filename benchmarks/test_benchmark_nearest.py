@@ -1,5 +1,6 @@
 import importlib.util
 from itertools import product
+from typing import Optional
 
 import pytest
 import torch
@@ -38,7 +39,7 @@ def _assert_nearest_within_cuda(
     out_triton: torch.Tensor,
     x: torch.Tensor,
     y: torch.Tensor,
-    tol: float | None = None,
+    tol: Optional[float] = None,
 ) -> None:
     if tol is None:
         tol = 5 * torch.finfo(x.dtype).eps
