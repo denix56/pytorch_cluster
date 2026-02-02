@@ -62,12 +62,7 @@ def radius(
     if use_batch:
         example_idx = batch_y.to(torch.int64).contiguous()
     else:
-        y_idx = torch.arange(M, device=y.device, dtype=torch.int64)
-        if ptr_y.numel() > 2:
-            ptr_y_mid = ptr_y[1:-1].contiguous()
-        else:
-            ptr_y_mid = ptr_y.new_empty((0,))
-        example_idx = torch.bucketize(y_idx, ptr_y_mid, right=False)
+        example_idx = ptr_x  # Dummy; kernel ignores when USE_BATCH=False.
 
     seg_sizes = torch.diff(ptr_x).to(torch.int64)
     if seg_sizes.numel() > 0:
@@ -101,6 +96,7 @@ def radius(
         y.stride(1),
         float(r) * float(r),
         max_num_neighbors,
+        USE_BATCH=use_batch,
         IGNORE_SAME_INDEX=ignore_same_index,
     )
 
