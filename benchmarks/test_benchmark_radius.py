@@ -33,7 +33,7 @@ RADIUS_SIZES = [
     (255, 5),
 ]
 RADIUS_GROUPS = [1, 2, 4, 8, 16, 32]
-FEATURES = [8, 64, 200]
+FEATURES = [3, 8, 64, 200]
 
 
 def to_set(edge_index):
