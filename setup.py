@@ -142,6 +142,7 @@ setup(
     install_requires=install_requires,
     extras_require={
         'test': test_requires,
+        'pallas': ['jax'],
     },
     ext_modules=get_extensions() if not BUILD_DOCS else [],
     cmdclass={

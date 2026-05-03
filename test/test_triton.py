@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import time
 
 import pytest
@@ -36,6 +37,7 @@ pytestmark = pytest.mark.skipif(
     not (HAS_CUDA and HAS_TRITON),
     reason='CUDA and Triton are required for Triton parity tests.',
 )
+pytestmark = [pytestmark, pytest.mark.triton, pytest.mark.accelerator]
 
 
 def _sort_edge_index(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
@@ -80,6 +82,27 @@ def test_knn_triton_matches_cuda():
         _sort_edge_index(out_cuda, x.size(0)),
         _sort_edge_index(out_triton, x.size(0)),
     )
+
+
+def test_knn_triton_sparse_batch_matches_cuda():
+    x = torch.tensor([[0.0], [10.0], [11.0]], device='cuda')
+    y = torch.tensor([[0.5], [10.5]], device='cuda')
+    batch_x = torch.tensor([0, 2, 2], dtype=torch.long, device='cuda')
+    batch_y = torch.tensor([0, 2], dtype=torch.long, device='cuda')
+
+    out_cuda = knn(x,
+                   y,
+                   k=3,
+                   batch_x=batch_x,
+                   batch_y=batch_y,
+                   batch_size=3)
+    out_triton = knn__triton(x,
+                             y,
+                             k=3,
+                             batch_x=batch_x,
+                             batch_y=batch_y,
+                             batch_size=3)
+    assert torch.equal(out_cuda, out_triton)
 
 
 def test_knn_graph_triton_matches_cuda():
@@ -139,6 +162,37 @@ def test_radius_triton_matches_cuda():
     )
 
 
+def test_radius_triton_boundary_and_truncation_match_cuda():
+    y = torch.tensor([[0.0]], device='cuda')
+
+    x = torch.tensor([[1.9], [0.1], [0.2]], device='cuda')
+    out_cuda = radius(x, y, r=2.0, max_num_neighbors=2)
+    out_triton = radius__triton(x, y, r=2.0, max_num_neighbors=2)
+    assert torch.equal(out_cuda, out_triton)
+
+    x = torch.tensor([[0.0], [2.0]], device='cuda')
+    out_cuda = radius(x, y, r=2.0, max_num_neighbors=2)
+    out_triton = radius__triton(x, y, r=2.0, max_num_neighbors=2)
+    assert torch.equal(out_cuda, out_triton)
+
+
+def test_radius_triton_ignore_same_index_matches_cuda():
+    x = torch.tensor([[100.0], [0.0], [0.0]], device='cuda')
+    y = torch.tensor([[0.0], [0.0], [0.0]], device='cuda')
+
+    out_cuda = radius(x,
+                      y,
+                      r=200.0,
+                      max_num_neighbors=x.size(0),
+                      ignore_same_index=True)
+    out_triton = radius__triton(x,
+                                y,
+                                r=200.0,
+                                max_num_neighbors=x.size(0),
+                                ignore_same_index=True)
+    assert torch.equal(out_cuda, out_triton)
+
+
 def test_radius_graph_triton_matches_cuda():
     torch.manual_seed(3)
     x = torch.randn(64, 4, device='cuda')
@@ -158,6 +212,26 @@ def test_nearest_triton_matches_cuda():
     y = torch.randn(32, 8, device='cuda')
     batch_x = torch.zeros(x.size(0), dtype=torch.long, device='cuda')
     batch_y = torch.zeros(y.size(0), dtype=torch.long, device='cuda')
+
+    out_cuda = nearest(x, y, batch_x, batch_y)
+    out_triton = nearest__triton(x, y, batch_x, batch_y)
+    assert torch.equal(out_cuda, out_triton)
+
+
+def test_nearest_triton_unbatched_matches_cuda():
+    x = torch.tensor([[0.0], [10.0]], device='cuda')
+    y = torch.tensor([[1.0], [9.0], [11.0]], device='cuda')
+
+    out_cuda = nearest(x, y)
+    out_triton = nearest__triton(x, y)
+    assert torch.equal(out_cuda, out_triton)
+
+
+def test_nearest_triton_batched_matches_cuda():
+    x = torch.tensor([[0.0], [10.0], [11.0]], device='cuda')
+    y = torch.tensor([[0.5], [9.0], [11.5]], device='cuda')
+    batch_x = torch.tensor([0, 2, 2], dtype=torch.long, device='cuda')
+    batch_y = torch.tensor([0, 2, 2], dtype=torch.long, device='cuda')
 
     out_cuda = nearest(x, y, batch_x, batch_y)
     out_triton = nearest__triton(x, y, batch_x, batch_y)
@@ -229,6 +303,9 @@ def test_triton_edge_cases():
 
 
 @pytest.mark.parametrize('num_x,num_y', [(256, 128), (1024, 512), (4096, 2048)])
+@pytest.mark.triton_perf
+@pytest.mark.skipif(os.getenv('RUN_TORCH_CLUSTER_PERF') != '1',
+                    reason='Set RUN_TORCH_CLUSTER_PERF=1 to run benchmarks.')
 def test_triton_knn_performance(num_x, num_y):
     torch.manual_seed(99)
     x = torch.randn(num_x, 16, device='cuda')
@@ -248,6 +325,9 @@ def test_triton_knn_performance(num_x, num_y):
 
 
 @pytest.mark.parametrize('num_x,num_y', [(256, 128), (1024, 512), (4096, 2048)])
+@pytest.mark.triton_perf
+@pytest.mark.skipif(os.getenv('RUN_TORCH_CLUSTER_PERF') != '1',
+                    reason='Set RUN_TORCH_CLUSTER_PERF=1 to run benchmarks.')
 def test_triton_radius_performance(num_x, num_y):
     torch.manual_seed(199)
     x = torch.randn(num_x, 8, device='cuda')

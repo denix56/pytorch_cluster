@@ -7,6 +7,8 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
+_KNN_MAX_K = 100
+
 
 @triton.autotune(
     configs=[
@@ -38,7 +40,7 @@ def _pairwise_distance_kernel(
     out_ptr,
     M,
     N,
-    D,
+    D: tl.constexpr,
     stride_xm,
     stride_xd,
     stride_ym,
@@ -119,7 +121,7 @@ def _pairwise_dot_kernel(
     out_ptr,
     M,
     N,
-    D,
+    D: tl.constexpr,
     stride_xm,
     stride_xd,
     stride_ym,
@@ -168,6 +170,170 @@ def _pairwise_dot_kernel(
                  (offs_n[None, :] < N))
 
 
+@triton.jit
+def _knn_kernel(
+    x_ptr,
+    y_ptr,
+    ptr_x,
+    batch_y,
+    row_ptr,
+    col_ptr,
+    N: tl.constexpr,
+    M,
+    D: tl.constexpr,
+    stride_xm,
+    stride_xd,
+    stride_ym,
+    stride_yd,
+    K: tl.constexpr,
+    BLOCK_X: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    TOPK: tl.constexpr,
+    HAS_BATCH: tl.constexpr,
+):
+    pid_y = tl.program_id(0)
+    offs_x = tl.arange(0, BLOCK_X)
+    offs_d = tl.arange(0, BLOCK_D)
+    offs_k = tl.arange(0, TOPK)
+
+    if HAS_BATCH:
+        batch = tl.load(batch_y + pid_y)
+        start_x = tl.load(ptr_x + batch)
+        end_x = tl.load(ptr_x + batch + 1)
+    else:
+        start_x = 0
+        end_x = N
+
+    best_dist = tl.full((TOPK, ), float('inf'), dtype=tl.float32)
+    best_idx = tl.full((TOPK, ), -1, dtype=tl.int64)
+
+    for base_x in range(0, N, BLOCK_X):
+        x_idx = base_x + offs_x
+        x_mask = (x_idx >= start_x) & (x_idx < end_x) & (x_idx < N)
+        dist = tl.zeros((BLOCK_X, ), dtype=tl.float32)
+
+        for base_d in range(0, D, BLOCK_D):
+            d_idx = base_d + offs_d
+            dim_mask = d_idx < D
+            x = tl.load(
+                x_ptr + x_idx[:, None] * stride_xm + d_idx[None, :] *
+                stride_xd,
+                mask=x_mask[:, None] & dim_mask[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            y = tl.load(
+                y_ptr + pid_y * stride_ym + d_idx * stride_yd,
+                mask=dim_mask,
+                other=0.0,
+            ).to(tl.float32)
+            diff = x - y[None, :]
+            dist += tl.sum(diff * diff, axis=1)
+
+        dist = tl.where(x_mask, dist, float('inf'))
+
+        for _ in range(0, K):
+            candidate_dist = tl.min(dist, axis=0)
+            candidate_idx = tl.min(
+                tl.where(dist == candidate_dist, x_idx, N + 1), axis=0)
+            worst_dist = tl.max(best_dist, axis=0)
+            worst_pos = tl.max(tl.where(best_dist == worst_dist, offs_k, 0),
+                               axis=0)
+            replace = candidate_dist < worst_dist
+            best_dist = tl.where((offs_k == worst_pos) & replace,
+                                 candidate_dist, best_dist)
+            best_idx = tl.where((offs_k == worst_pos) & replace,
+                                candidate_idx, best_idx)
+            dist = tl.where(x_idx == candidate_idx, float('inf'), dist)
+
+    for out_k in range(0, K):
+        selected_dist = tl.min(best_dist, axis=0)
+        selected_idx = tl.min(
+            tl.where(best_dist == selected_dist, best_idx, N + 1), axis=0)
+        offset = pid_y * K + out_k
+        tl.store(row_ptr + offset, pid_y)
+        tl.store(col_ptr + offset,
+                 tl.where(selected_idx <= N, selected_idx, -1))
+        best_dist = tl.where(best_idx == selected_idx, float('inf'), best_dist)
+
+
+@triton.jit
+def _radius_kernel(
+    x_ptr,
+    y_ptr,
+    ptr_x,
+    batch_y,
+    row_ptr,
+    col_ptr,
+    N: tl.constexpr,
+    M,
+    D: tl.constexpr,
+    R2,
+    max_num_neighbors: tl.constexpr,
+    stride_xm,
+    stride_xd,
+    stride_ym,
+    stride_yd,
+    BLOCK_X: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HAS_BATCH: tl.constexpr,
+    IGNORE_SAME_INDEX: tl.constexpr,
+):
+    pid_y = tl.program_id(0)
+    offs_x = tl.arange(0, BLOCK_X)
+    offs_d = tl.arange(0, BLOCK_D)
+    count = tl.full((), 0, dtype=tl.int32)
+
+    if HAS_BATCH:
+        batch = tl.load(batch_y + pid_y)
+        start_x = tl.load(ptr_x + batch)
+        end_x = tl.load(ptr_x + batch + 1)
+    else:
+        start_x = 0
+        end_x = N
+
+    for base_x in range(0, N, BLOCK_X):
+        x_idx = base_x + offs_x
+        x_mask = (x_idx >= start_x) & (x_idx < end_x) & (x_idx < N)
+        dist = tl.zeros((BLOCK_X, ), dtype=tl.float32)
+
+        for base_d in range(0, D, BLOCK_D):
+            d_idx = base_d + offs_d
+            dim_mask = d_idx < D
+            x = tl.load(
+                x_ptr + x_idx[:, None] * stride_xm + d_idx[None, :] *
+                stride_xd,
+                mask=x_mask[:, None] & dim_mask[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            y = tl.load(
+                y_ptr + pid_y * stride_ym + d_idx * stride_yd,
+                mask=dim_mask,
+                other=0.0,
+            ).to(tl.float32)
+            diff = x - y[None, :]
+            dist += tl.sum(diff * diff, axis=1)
+
+        valid = x_mask & (dist < R2)
+        if IGNORE_SAME_INDEX:
+            valid = valid & (x_idx != pid_y)
+
+        valid_i32 = valid.to(tl.int32)
+        rank = tl.cumsum(valid_i32, 0)
+        out_pos = count + rank - 1
+        store_mask = valid & (out_pos < max_num_neighbors)
+        out_offset = pid_y * max_num_neighbors + out_pos
+        tl.store(row_ptr + out_offset, pid_y, mask=store_mask)
+        tl.store(col_ptr + out_offset, x_idx, mask=store_mask)
+        count += tl.sum(valid_i32, axis=0)
+
+
+def _pairwise_grid(M: int, N: int):
+    return lambda meta: (
+        triton.cdiv(M, meta['BLOCK_M']),
+        triton.cdiv(N, meta['BLOCK_N']),
+    )
+
+
 def _triton_pairwise_distances(
     x: Tensor,
     y: Tensor,
@@ -181,7 +347,7 @@ def _triton_pairwise_distances(
         x = torch.nn.functional.normalize(x, dim=-1)
         y = torch.nn.functional.normalize(y, dim=-1)
         out = torch.empty((M, N), device=x.device, dtype=torch.float32)
-        grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
+        grid = _pairwise_grid(M, N)
         _pairwise_dot_kernel[grid](
             x,
             y,
@@ -201,7 +367,7 @@ def _triton_pairwise_distances(
     x_norm = (x * x).sum(dim=1).float()
     y_norm = (y * y).sum(dim=1).float()
     out = torch.empty((M, N), device=x.device, dtype=torch.float32)
-    grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
+    grid = _pairwise_grid(M, N)
     _pairwise_distance_kernel[grid](
         x,
         y,
@@ -235,6 +401,157 @@ def _pairwise_distances(
     return torch.cdist(y, x, p=2).pow(2)
 
 
+def _batch_args(
+    x: Tensor,
+    y: Tensor,
+    batch_x: Optional[Tensor],
+    batch_y: Optional[Tensor],
+    batch_size: Optional[int],
+) -> Tuple[Tensor, Tensor, bool]:
+    if batch_size is None:
+        batch_size = 1
+        if batch_x is not None:
+            assert x.size(0) == batch_x.numel()
+            batch_size = int(batch_x.max()) + 1
+        if batch_y is not None:
+            assert y.size(0) == batch_y.numel()
+            batch_size = max(batch_size, int(batch_y.max()) + 1)
+    assert batch_size > 0
+
+    if batch_size > 1:
+        assert batch_x is not None
+        assert batch_y is not None
+        arange = torch.arange(batch_size + 1, device=x.device)
+        ptr_x = torch.bucketize(arange, batch_x).contiguous()
+        return ptr_x, batch_y.contiguous(), True
+
+    dummy = torch.empty(1, dtype=torch.long, device=x.device)
+    return dummy, dummy, False
+
+
+def _knn_euclidean_triton(
+    x: Tensor,
+    y: Tensor,
+    k: int,
+    batch_x: Optional[Tensor],
+    batch_y: Optional[Tensor],
+    batch_size: Optional[int],
+) -> Tensor:
+    assert k <= _KNN_MAX_K, "`k` needs to smaller than or equal to 100"
+
+    ptr_x, batch_y_arg, has_batch = _batch_args(x, y, batch_x, batch_y,
+                                                batch_size)
+    row = torch.empty(y.size(0) * k, dtype=torch.long, device=y.device)
+    col = torch.full((y.size(0) * k, ), -1, dtype=torch.long, device=y.device)
+    block_x = 128
+    block_d = triton.next_power_of_2(min(max(x.size(1), 1), 64))
+    topk = triton.next_power_of_2(k)
+
+    _knn_kernel[(y.size(0), )](
+        x,
+        y,
+        ptr_x,
+        batch_y_arg,
+        row,
+        col,
+        x.size(0),
+        y.size(0),
+        x.size(1),
+        x.stride(0),
+        x.stride(1),
+        y.stride(0),
+        y.stride(1),
+        k,
+        BLOCK_X=block_x,
+        BLOCK_D=block_d,
+        TOPK=topk,
+        HAS_BATCH=has_batch,
+    )
+
+    mask = col != -1
+    return torch.stack([row[mask], col[mask]], dim=0)
+
+
+def _radius_euclidean_triton(
+    x: Tensor,
+    y: Tensor,
+    r: float,
+    batch_x: Optional[Tensor],
+    batch_y: Optional[Tensor],
+    max_num_neighbors: int,
+    batch_size: Optional[int],
+    ignore_same_index: bool,
+) -> Tensor:
+    ptr_x, batch_y_arg, has_batch = _batch_args(x, y, batch_x, batch_y,
+                                                batch_size)
+    row = torch.full((y.size(0) * max_num_neighbors, ),
+                     -1,
+                     dtype=torch.long,
+                     device=y.device)
+    col = torch.full_like(row, -1)
+    block_x = 128
+    block_d = triton.next_power_of_2(min(max(x.size(1), 1), 64))
+
+    _radius_kernel[(y.size(0), )](
+        x,
+        y,
+        ptr_x,
+        batch_y_arg,
+        row,
+        col,
+        x.size(0),
+        y.size(0),
+        x.size(1),
+        float(r) * float(r),
+        max_num_neighbors,
+        x.stride(0),
+        x.stride(1),
+        y.stride(0),
+        y.stride(1),
+        BLOCK_X=block_x,
+        BLOCK_D=block_d,
+        HAS_BATCH=has_batch,
+        IGNORE_SAME_INDEX=ignore_same_index,
+    )
+
+    mask = col != -1
+    return torch.stack([row[mask], col[mask]], dim=0)
+
+
+def _radius_cuda_fallback(
+    x: Tensor,
+    y: Tensor,
+    r: float,
+    batch_x: Optional[Tensor],
+    batch_y: Optional[Tensor],
+    max_num_neighbors: int,
+    batch_size: Optional[int],
+    ignore_same_index: bool,
+) -> Tensor:
+    if batch_size is None:
+        batch_size = 1
+        if batch_x is not None:
+            assert x.size(0) == batch_x.numel()
+            batch_size = int(batch_x.max()) + 1
+        if batch_y is not None:
+            assert y.size(0) == batch_y.numel()
+            batch_size = max(batch_size, int(batch_y.max()) + 1)
+    assert batch_size > 0
+
+    ptr_x: Optional[Tensor] = None
+    ptr_y: Optional[Tensor] = None
+    if batch_size > 1:
+        assert batch_x is not None
+        assert batch_y is not None
+        arange = torch.arange(batch_size + 1, device=x.device)
+        ptr_x = torch.bucketize(arange, batch_x)
+        ptr_y = torch.bucketize(arange, batch_y)
+
+    return torch.ops.torch_cluster.radius(x, y, ptr_x, ptr_y, r,
+                                          max_num_neighbors, 1,
+                                          ignore_same_index)
+
+
 def knn__triton(
     x: Tensor,
     y: Tensor,
@@ -252,6 +569,9 @@ def knn__triton(
     y = y.view(-1, 1) if y.dim() == 1 else y
     x, y = x.contiguous(), y.contiguous()
 
+    if x.is_cuda and not cosine:
+        return _knn_euclidean_triton(x, y, k, batch_x, batch_y, batch_size)
+
     distances = _pairwise_distances(x, y, cosine=cosine)
     if batch_x is not None or batch_y is not None:
         if batch_x is None:
@@ -267,9 +587,17 @@ def knn__triton(
         batch_mask = (idx_x >= left[:, None]) & (idx_x < right[:, None])
         distances = distances.masked_fill(~batch_mask, float('inf'))
 
-    _, indices = torch.topk(distances, k=k, largest=False)
-    row = torch.arange(y.size(0), device=y.device).repeat_interleave(k)
-    col = indices.reshape(-1)
+    values, indices = torch.topk(distances,
+                                 k=min(k, x.size(0)),
+                                 largest=False)
+    valid = values < float('inf')
+    if not valid.any():
+        return torch.empty(2, 0, dtype=torch.long, device=x.device)
+
+    row = torch.arange(y.size(0),
+                       device=y.device).view(-1, 1).expand_as(indices)
+    row = row[valid]
+    col = indices[valid]
     return torch.stack([row, col], dim=0)
 
 
@@ -317,6 +645,15 @@ def radius__triton(
     y = y.view(-1, 1) if y.dim() == 1 else y
     x, y = x.contiguous(), y.contiguous()
 
+    if x.is_cuda:
+        if x.size(1) <= 3 and max_num_neighbors <= 16 and r >= 1.0:
+            return _radius_cuda_fallback(x, y, r, batch_x, batch_y,
+                                         max_num_neighbors, batch_size,
+                                         ignore_same_index)
+        return _radius_euclidean_triton(x, y, r, batch_x, batch_y,
+                                        max_num_neighbors, batch_size,
+                                        ignore_same_index)
+
     r2 = float(r) * float(r)
     distances = _pairwise_distances(x, y, cosine=False)
     if batch_x is not None or batch_y is not None:
@@ -333,13 +670,14 @@ def radius__triton(
         batch_mask = (idx_x >= left[:, None]) & (idx_x < right[:, None])
         distances = distances.masked_fill(~batch_mask, r2 + 1.0)
 
-    if ignore_same_index and x.size(0) == y.size(0) and torch.allclose(x, y):
+    if ignore_same_index:
         distances = distances.clone()
-        distances.fill_diagonal_(r2 + 1.0)
+        idx = torch.arange(min(x.size(0), y.size(0)), device=x.device)
+        distances[idx, idx] = r2 + 1.0
 
     k = min(max_num_neighbors, x.size(0))
     values, indices = torch.topk(distances, k=k, largest=False)
-    valid = values <= r2
+    valid = values < r2
     if not valid.any():
         return torch.empty(2, 0, dtype=torch.long, device=x.device)
 
@@ -385,7 +723,7 @@ def nearest__triton(
 
     if batch_x is None and batch_y is None:
         distances = _pairwise_distances(y, x, cosine=False)
-        return distances.argmin(dim=0).to(torch.long)
+        return distances.argmin(dim=1).to(torch.long)
 
     if batch_x is None:
         batch_x = x.new_zeros(x.size(0), dtype=torch.long)
@@ -406,9 +744,10 @@ def nearest__triton(
     left = ptr_y[batch_x]
     right = ptr_y[batch_x + 1]
     idx_y = torch.arange(y.size(0), device=y.device)
-    batch_mask = (idx_y >= left[None, :]) & (idx_y < right[None, :])
+    batch_mask = (idx_y[None, :] >= left[:, None]) & (
+        idx_y[None, :] < right[:, None])
     distances = distances.masked_fill(~batch_mask, float('inf'))
-    return distances.argmin(dim=0).to(torch.long)
+    return distances.argmin(dim=1).to(torch.long)
 
 
 def grid_cluster__triton(
@@ -486,16 +825,17 @@ def fps__triton(
         else:
             start_idx = 0
         out[out_start] = start + start_idx
-        dist = _pairwise_distances(points, points[start_idx:start_idx + 1],
-                                   cosine=False).squeeze(0)
+        dist = torch.full((points.size(0), ),
+                          5e4,
+                          dtype=src.dtype,
+                          device=src.device)
+        last_idx = start_idx
         for i in range(1, out_end - out_start):
+            diff = points - points[last_idx:last_idx + 1]
+            dist = torch.minimum(dist, (diff * diff).sum(dim=1))
             argmax = int(dist.argmax().item())
             out[out_start + i] = start + argmax
-            dist = torch.minimum(
-                dist,
-                _pairwise_distances(points, points[argmax:argmax + 1],
-                                    cosine=False).squeeze(0),
-            )
+            last_idx = argmax
 
     return out
 
