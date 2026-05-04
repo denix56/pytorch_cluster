@@ -37,8 +37,9 @@ def _batch_mask(
 
 
 def _pairwise_distance_kernel(x_ref, y_ref, out_ref):
-    diff = y_ref[:, None, :].astype(jnp.float32) - x_ref[None, :, :].astype(
-        jnp.float32)
+    x = x_ref[:, :].astype(jnp.float32)
+    y = y_ref[:, :].astype(jnp.float32)
+    diff = y[:, None, :] - x[None, :, :]
     out_ref[:, :] = jnp.sum(diff * diff, axis=-1)
 
 
@@ -47,16 +48,21 @@ def _pairwise_distance_pallas(
     y,
     *,
     block_m: int = 64,
-    block_n: int = 64,
+    block_n: int = 128,
     interpret: bool = False,
 ):
     if x.ndim != 2 or y.ndim != 2:
         raise ValueError("'x' and 'y' must be two-dimensional arrays")
     if x.shape[1] != y.shape[1]:
         raise ValueError("'x' and 'y' must have the same feature dimension")
+    if block_m <= 0 or block_n <= 0:
+        raise ValueError("'block_m' and 'block_n' must be positive")
 
     n, dim = x.shape
     m = y.shape[0]
+    if n == 0 or m == 0:
+        return jnp.zeros((m, n), dtype=jnp.float32)
+
     padded_m = _ceil_div(m, block_m) * block_m
     padded_n = _ceil_div(n, block_n) * block_n
     x_pad = _pad_rows(x, padded_n)
@@ -90,11 +96,18 @@ def pairwise_distance(
     *,
     backend: str = 'auto',
     block_m: int = 64,
-    block_n: int = 64,
+    block_n: int = 128,
     interpret: bool = False,
 ):
     x = jnp.asarray(x)
     y = jnp.asarray(y)
+    if x.ndim != 2 or y.ndim != 2:
+        raise ValueError("'x' and 'y' must be two-dimensional arrays")
+    if x.shape[1] != y.shape[1]:
+        raise ValueError("'x' and 'y' must have the same feature dimension")
+    if x.shape[0] == 0 or y.shape[0] == 0:
+        return jnp.zeros((y.shape[0], x.shape[0]), dtype=jnp.float32)
+
     if _should_use_pallas(backend):
         return _pairwise_distance_pallas(x,
                                          y,
@@ -119,11 +132,11 @@ def grid_cluster(pos, size, start=None, end=None):
     start = jnp.asarray(start)
     end = jnp.asarray(end)
     pos = pos - start[None, :]
-    num_voxels = ((end - start) / size).astype(jnp.int64) + 1
+    num_voxels = ((end - start) / size).astype(jnp.int32) + 1
     multipliers = jnp.cumprod(num_voxels)
     multipliers = jnp.concatenate(
         [jnp.ones((1, ), dtype=multipliers.dtype), multipliers[:-1]])
-    coords = (pos / size.reshape((1, -1))).astype(jnp.int64)
+    coords = (pos / size.reshape((1, -1))).astype(jnp.int32)
     return jnp.sum(coords * multipliers.reshape((1, -1)), axis=1)
 
 
@@ -135,17 +148,31 @@ def knn(
     batch_y=None,
     *,
     backend: str = 'auto',
+    block_m: int = 64,
+    block_n: int = 128,
+    interpret: bool = False,
     compact: bool = True,
 ) -> Tuple[jax.Array, Optional[jax.Array]]:
     x = jnp.asarray(x)
     y = jnp.asarray(y)
     x = x.reshape((-1, 1)) if x.ndim == 1 else x
     y = y.reshape((-1, 1)) if y.ndim == 1 else y
+    k = min(k, x.shape[0])
+    if x.shape[0] == 0 or y.shape[0] == 0 or k == 0:
+        edge_index = jnp.empty((2, 0), dtype=jnp.int32)
+        if compact:
+            return edge_index, None
+        return edge_index, jnp.zeros((y.shape[0], 0), dtype=bool)
 
-    distances = pairwise_distance(x, y, backend=backend)
+    distances = pairwise_distance(x,
+                                  y,
+                                  backend=backend,
+                                  block_m=block_m,
+                                  block_n=block_n,
+                                  interpret=interpret)
     mask = _batch_mask(batch_x, batch_y, x.shape[0], y.shape[0])
     distances = jnp.where(mask, distances, jnp.inf)
-    values, indices = jax.lax.top_k(-distances, min(k, x.shape[0]))
+    values, indices = jax.lax.top_k(-distances, k)
     valid = jnp.isfinite(-values)
 
     row = jnp.broadcast_to(jnp.arange(y.shape[0])[:, None], indices.shape)
@@ -164,6 +191,9 @@ def knn_graph(
     loop: bool = False,
     flow: str = 'source_to_target',
     backend: str = 'auto',
+    block_m: int = 64,
+    block_n: int = 128,
+    interpret: bool = False,
     compact: bool = True,
 ):
     if flow not in {'source_to_target', 'target_to_source'}:
@@ -175,6 +205,9 @@ def knn_graph(
                             batch,
                             batch,
                             backend=backend,
+                            block_m=block_m,
+                            block_n=block_n,
+                            interpret=interpret,
                             compact=False)
     row, col = edge_index[1], edge_index[0]
     if flow == 'target_to_source':
@@ -200,14 +233,27 @@ def radius(
     max_num_neighbors: int = 32,
     ignore_same_index: bool = False,
     backend: str = 'auto',
+    block_m: int = 64,
+    block_n: int = 128,
+    interpret: bool = False,
     compact: bool = True,
 ):
     x = jnp.asarray(x)
     y = jnp.asarray(y)
     x = x.reshape((-1, 1)) if x.ndim == 1 else x
     y = y.reshape((-1, 1)) if y.ndim == 1 else y
+    if x.shape[0] == 0 or y.shape[0] == 0 or max_num_neighbors == 0:
+        edge_index = jnp.empty((2, 0), dtype=jnp.int32)
+        if compact:
+            return edge_index, None
+        return edge_index, jnp.zeros((y.shape[0], 0), dtype=bool)
 
-    distances = pairwise_distance(x, y, backend=backend)
+    distances = pairwise_distance(x,
+                                  y,
+                                  backend=backend,
+                                  block_m=block_m,
+                                  block_n=block_n,
+                                  interpret=interpret)
     valid = distances < float(r) * float(r)
     valid = valid & _batch_mask(batch_x, batch_y, x.shape[0], y.shape[0])
     if ignore_same_index:
@@ -235,6 +281,9 @@ def radius_graph(
     max_num_neighbors: int = 32,
     flow: str = 'source_to_target',
     backend: str = 'auto',
+    block_m: int = 64,
+    block_n: int = 128,
+    interpret: bool = False,
     compact: bool = True,
 ):
     if flow not in {'source_to_target', 'target_to_source'}:
@@ -248,6 +297,9 @@ def radius_graph(
                                max_num_neighbors=max_num_neighbors,
                                ignore_same_index=not loop,
                                backend=backend,
+                               block_m=block_m,
+                               block_n=block_n,
+                               interpret=interpret,
                                compact=False)
     row, col = edge_index[1], edge_index[0]
     if flow == 'target_to_source':
@@ -266,13 +318,25 @@ def nearest(
     batch_y=None,
     *,
     backend: str = 'auto',
+    block_m: int = 64,
+    block_n: int = 128,
+    interpret: bool = False,
 ):
     x = jnp.asarray(x)
     y = jnp.asarray(y)
     x = x.reshape((-1, 1)) if x.ndim == 1 else x
     y = y.reshape((-1, 1)) if y.ndim == 1 else y
+    if x.shape[0] == 0:
+        return jnp.empty((0, ), dtype=jnp.int32)
+    if y.shape[0] == 0:
+        raise ValueError("'y' must contain at least one point")
 
-    distances = pairwise_distance(y, x, backend=backend)
+    distances = pairwise_distance(y,
+                                  x,
+                                  backend=backend,
+                                  block_m=block_m,
+                                  block_n=block_n,
+                                  interpret=interpret)
     mask = _batch_mask(batch_y, batch_x, y.shape[0], x.shape[0])
     distances = jnp.where(mask, distances, jnp.inf)
-    return jnp.argmin(distances, axis=1).astype(jnp.int64)
+    return jnp.argmin(distances, axis=1).astype(jnp.int32)

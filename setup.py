@@ -143,6 +143,7 @@ setup(
     extras_require={
         'test': test_requires,
         'pallas': ['jax'],
+        'pallas-tpu': ['jax[tpu]'],
     },
     ext_modules=get_extensions() if not BUILD_DOCS else [],
     cmdclass={
